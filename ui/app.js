@@ -270,6 +270,8 @@
     var c = active && chats[active];
     $('welcome').hidden = !!c;
     $('state').hidden = !c; $('btn-close').hidden = !c; $('btn-tmenu').hidden = !c;
+    $('dd-env').hidden = $('dd-folder').hidden = !!c;
+    renderFolderChip();
     if($('t-title').querySelector('input.rn')) return;
     renderChips();
     Object.keys(chats).forEach(function(id){ chats[id].feed.hidden = id !== active; });
@@ -514,6 +516,36 @@
       + '<button class="mi row" type="button" data-fast="1"' + (canFast ? '' : ' disabled title="ใช้ได้กับ Opus"') + '><span class="mt"><b>Enable fast mode</b></span><span class="sw' + (j.fast && canFast ? ' on' : '') + '"><i></i></span></button>';
     return html;
   }
+  // new-session bar (like the Claude app): This computer · folder · mode
+  var curCwd = '';
+  var I_FOLDER_S = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  function renderFolderChip(){ $('chip-folder').innerHTML = I_FOLDER_S + esc(curCwd ? pname(curCwd) : 'เลือกโฟลเดอร์'); $('chip-folder').title = curCwd; }
+  function recentFolders(){
+    var seen = {}, out = [];
+    [{ cwd:curCwd, ts:Infinity }].concat(histAll.slice().sort(function(a, b){ return (b.ts || 0) - (a.ts || 0); })).forEach(function(h){
+      var k = pkey(h.cwd); if(!h.cwd || seen[k]) return; seen[k] = 1; out.push(h.cwd);
+    });
+    return out.slice(0, 12);
+  }
+  function setFolder(path){
+    var body = path ? { path:path } : {};
+    if(!path) hint('เลือกโฟลเดอร์ในหน้าต่างที่เปิดขึ้น');
+    return api('/api/folder', body).then(function(r){
+      if(!r.ok){ hint(r.error); return; }
+      if(!r.same){ curCwd = r.cwd; hint(''); }
+      else if(!path) hint('');
+      renderFolderChip(); refreshState(true); loadCommands(true); loadPanel();
+    });
+  }
+  function openFolderMenu(){
+    var m = $('menu-folder');
+    m.innerHTML = '<div class="mh">โฟลเดอร์งาน</div>' + recentFolders().map(function(p){
+      var on = pkey(p) === pkey(curCwd);
+      return '<button class="mi row" type="button" data-folder="' + esc(p) + '" title="' + esc(p) + '"><span class="mt"><b>' + esc(pname(p)) + '</b><small>' + esc(shortPath(p)) + '</small></span><span class="rs">' + (on ? '<span class="okc">' + I_CHECK + '</span>' : '') + '</span></button>';
+    }).join('') + '<div class="sep"></div><button class="mi row" type="button" data-folder=""><span class="mt"><b>เลือกโฟลเดอร์อื่น…</b></span></button>';
+    m.hidden = false;
+  }
+  function newDraft(){ show(null); $('input').focus(); }
   function pickModel(v){
     var kv = { model:v };
     if(!isOpus(v) && (cur() || {}).fast) kv.fast = false;
@@ -614,6 +646,7 @@
       // a chat opened after this request left is not in its answer yet: keep it
       Object.keys(chats).forEach(function(id){ if(chats[id].born < t0 && !s.chats.some(function(i){ return i.id === id; })){ chats[id].feed.remove(); delete chats[id]; if(active === id) active = null; } });
       histAll = s.history || [];
+      if(s.cwd && s.cwd !== curCwd){ curCwd = s.cwd; renderFolderChip(); }
       prefs = s.prefs || prefs; usage = s.usage || {};
       renderAcct(s.auth); renderUsage(); renderSide(); header();
     }).catch(function(){ hint('ติดต่อโปรแกรมไม่ได้ ปิดหน้าต่างแล้วเปิดใหม่จากไฟล์ .bat'); });
@@ -741,7 +774,11 @@
   function autosize(){ var t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(260, t.scrollHeight) + 'px'; }
 
   // ── events ──
-  $('btn-new').onclick = function(){ newChat(); };
+  $('btn-new').onclick = newDraft;
+  $('chip-folder').onclick = function(e){ e.stopPropagation(); var m = $('menu-folder'); if(m.hidden){ closeMenus(); openFolderMenu(); } else m.hidden = true; };
+  $('menu-folder').onclick = function(e){ e.stopPropagation(); var b = e.target.closest('[data-folder]'); if(!b) return; $('menu-folder').hidden = true; setFolder(b.getAttribute('data-folder')); };
+  $('chip-env').onclick = function(e){ e.stopPropagation(); var m = $('menu-env'); m.innerHTML = '<button class="mi row" type="button"><span class="mt"><b>This computer</b><small>รันบนเครื่องนี้ ใช้ไฟล์และโปรแกรมในเครื่อง</small></span><span class="rs"><span class="okc">' + I_CHECK + '</span></span></button>'; var was = m.hidden; closeMenus(); m.hidden = !was; };
+  $('menu-env').onclick = function(e){ e.stopPropagation(); $('menu-env').hidden = true; };
   $('btn-send').onclick = send;
   $('btn-stop').onclick = function(){ if(active) api('/api/stop', { id:active }); };
   $('btn-close').onclick = function(){
@@ -776,8 +813,9 @@
       api('/api/folder', {}).then(function(r){ hint(r.ok ? (r.same ? '' : 'เปลี่ยนโฟลเดอร์แล้ว เซสชันใหม่จะทำงานที่นี่') : r.error); refreshState(true); loadCommands(true); loadPanel(); });
     }
   };
+  function closeMenus(){ ['menu-mode', 'menu-model', 'menu-folder', 'menu-env', 'menu-usage'].forEach(function(id){ $(id).hidden = true; }); }
   document.addEventListener('click', function(e){
-    $('menu-mode').hidden = true; $('menu-model').hidden = true;
+    $('menu-mode').hidden = true; $('menu-model').hidden = true; $('menu-folder').hidden = true; $('menu-env').hidden = true;
     if(!e.target.closest('#dd-usage')) $('menu-usage').hidden = true;
     if(!e.target.closest('#acct')) $('acct-menu').hidden = true;
     if(!e.target.closest('#menu-sess') && !e.target.closest('#btn-tmenu')) closeSessMenu();
@@ -796,6 +834,7 @@
     if(act === 'logout') return logout(b);
     $('acct-menu').hidden = true;
     if(act === 'login') return login();
+    if(act === 'folder') return setFolder('');
     if(act === 'usage'){ e.stopPropagation(); renderUsage(); $('menu-usage').hidden = false; }
   };
   $('btn-tmenu').onclick = function(){
@@ -813,7 +852,7 @@
     var f = e.target.closest('[data-fold]');
     if(f){ var k = f.getAttribute('data-fold'); folded[k] = !folded[k]; if(!folded[k]) delete folded[k]; try { localStorage.setItem('setto_folded', JSON.stringify(folded)); } catch(err){} return renderSide(); }
     var m = e.target.closest('[data-more]'); if(m){ var mk = m.getAttribute('data-more'); showAll[mk] = !showAll[mk]; return renderSide(); }
-    var n = e.target.closest('[data-newin]'); if(n) return newChat(null, '', n.getAttribute('data-newin'));
+    var n = e.target.closest('[data-newin]'); if(n){ newDraft(); return setFolder(n.getAttribute('data-newin')); }
   };
   $('btn-attach').onclick = function(){ $('file').click(); };
   $('file').onchange = function(e){ addFiles(e.target.files); e.target.value = ''; };
@@ -835,7 +874,7 @@
     if(files.length){ e.preventDefault(); addFiles(files); }
   });
   document.addEventListener('keydown', function(e){
-    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n'){ e.preventDefault(); newChat(); }
+    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n'){ e.preventDefault(); newDraft(); }
     if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k'){ e.preventDefault(); $('hist-q').focus(); $('hist-q').select(); }
     if(!$('menu-model').hidden && /^[1-4]$/.test(e.key) && document.activeElement !== $('input')){ e.preventDefault(); pickModel(MAIN_MODELS[+e.key - 1][0]); return; }
     if(!$('menu-sess').hidden && !e.ctrlKey && !e.altKey){

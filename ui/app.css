@@ -321,3 +321,17 @@ input.rn{width:100%;border:1px solid #38bdf8;background:rgba(56,189,248,.18);col
 .sw.on{background:var(--accent)}.sw.on i{left:16px}
 .chip .bolt{color:var(--warn);margin-right:-2px}
 .dimts{color:var(--muted);font-weight:500}
+
+/* composer bar chips flat like the Claude app; This computer + folder show on the new-session screen */
+.bar .chip{border-color:transparent;background:none;padding:5px 9px;font-weight:500;color:var(--muted)}
+.bar .chip:hover{background:var(--bg-2);color:var(--text);border-color:transparent}
+.bar .chip svg{flex:none}
+.bar .chip.bypass{color:var(--bad)}.bar .chip.auto{color:var(--accent-deep)}
+.bar #chip-model{color:var(--text)}
+#menu-folder,#menu-env{min-width:280px;padding:6px}
+#menu-folder .mi.row,#menu-env .mi.row{align-items:center;padding:7px 10px;border-radius:8px}
+#menu-folder .mi.row b,#menu-env .mi.row b{font-weight:500;font-size:14px}
+#menu-folder .mi.row small,#menu-env .mi.row small{font-size:11.5px}
+#menu-folder .rs,#menu-env .rs{display:inline-flex;color:var(--muted-2)}
+#menu-folder .okc,#menu-env .okc{color:var(--accent);display:inline-flex}
+#menu-folder{max-height:60vh;overflow:auto}

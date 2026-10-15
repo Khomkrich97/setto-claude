@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.2"
+VERSION = "1.3"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -965,8 +965,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if r.returncode != 0:
                 return {"ok": False, "error": (r.stderr or r.stdout or "ล็อกเอาท์ไม่สำเร็จ").strip()[:200]}
             return {"ok": True}
-        if path == "/api/folder":
-            got = pick_folder(Handler.CWD)
+        if path == "/api/folder":   # {path} = a folder picked from the list, {} = the folder dialog
+            want = str(body.get("path") or "")
+            got = (want if os.path.isdir(want) else None) if want else pick_folder(Handler.CWD)
             if not got:
                 return {"ok": True, "cwd": Handler.CWD, "same": True}
             cwd = set_folder(got)

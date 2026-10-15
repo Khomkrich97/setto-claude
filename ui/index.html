@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Setto Claude</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="mark" title="Setto"><svg viewBox="0 0 100 100" width="22" height="22" aria-hidden="true"><rect x="0" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="0" y="53.5" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="53.5" width="46.5" height="46.5" rx="10" fill="#8EDD8A"/></svg></div>
+      <div class="who" id="who"><span class="spin sm"></span></div>
+    </div>
+    <div class="usage" id="usage" hidden></div>
+    <button class="new" id="btn-new" type="button" title="Ctrl+N">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      เซสชันใหม่
+    </button>
+    <div class="sec">กำลังเปิด</div>
+    <div class="list" id="open"></div>
+    <div class="sec">ประวัติ<span id="hist-n"></span></div>
+    <input class="search" id="hist-q" type="search" placeholder="ค้นประวัติ">
+    <div class="list hist" id="hist"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <header class="top">
+      <div class="top-l">
+        <div class="t-title" id="t-title"></div>
+        <div class="t-sub" id="t-sub"></div>
+      </div>
+      <div class="top-r">
+        <span class="state" id="state" hidden></span>
+        <button class="ghost" id="btn-stop" type="button" hidden title="Esc">หยุด</button>
+        <button class="icon" id="btn-panel" type="button" title="แผงข้อมูล">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+        </button>
+        <button class="icon" id="btn-close" type="button" title="ปิดเซสชันนี้" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="feeds" id="feeds">
+      <section class="welcome" id="welcome"></section>
+    </div>
+
+    <footer class="composer" id="composer">
+      <div class="atts" id="atts" hidden></div>
+      <div class="cmds" id="cmds" hidden></div>
+      <div class="box">
+        <button class="icon attach" id="btn-attach" type="button" title="แนบภาพหรือไฟล์">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.1l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg>
+        </button>
+        <input type="file" id="file" multiple hidden>
+        <textarea id="input" rows="1" placeholder="พิมพ์งาน (Enter ส่ง, Shift+Enter ขึ้นบรรทัดใหม่, / ดูคำสั่ง)"></textarea>
+        <button class="send" id="btn-send" type="button" title="ส่ง">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+      <div class="bar">
+        <div class="dd" id="dd-mode"><button class="chip" id="chip-mode" type="button"></button><div class="menu up" id="menu-mode" hidden></div></div>
+        <div class="hint" id="hint"></div>
+        <div class="dd right" id="dd-model"><button class="chip" id="chip-model" type="button"></button><div class="menu up right" id="menu-model" hidden></div></div>
+      </div>
+    </footer>
+    <div class="drop" id="drop" hidden><div><b>วางภาพหรือไฟล์ตรงนี้</b><span>ภาพส่งให้ Claude ดูได้ทันที ไฟล์อื่นแนบเป็นที่อยู่ไฟล์</span></div></div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <section class="pc" id="p-env"></section>
+    <section class="pc" id="p-ctx"></section>
+    <section class="pc" id="p-task"></section>
+    <section class="pc" id="p-mcp"></section>
+    <section class="pc" id="p-out"></section>
+    <section class="pc" id="p-chg"></section>
+  </aside>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

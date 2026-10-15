@@ -21,6 +21,8 @@
     if(body !== undefined){ opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
     return fetch(path, opt).then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
+  // the page CSP blocks style="" attributes; bar widths go through the CSSOM instead
+  function widths(root){ Array.prototype.forEach.call(root.querySelectorAll('[data-w]'), function(n){ n.style.width = n.getAttribute('data-w') + '%'; }); }
   function el(tag, cls, html){ var e = document.createElement(tag); if(cls) e.className = cls; if(html != null) e.innerHTML = html; return e; }
   function shortPath(p){ p = String(p || ''); var parts = p.split(/[\\/]/); return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : p; }
   function hint(t){ $('hint').textContent = t || ''; }
@@ -198,7 +200,7 @@
     } else if(k === 'perm'){
       var pm = toolMeta(ev.tool, ev.input);
       n = el('div', 'ask');
-      n.innerHTML = '<div class="ah"><span class="bdg">ขออนุญาต</span>' + esc(pm[0]) + ' <span class="ts" style="color:var(--muted);font-weight:500">' + esc(pm[2] || '') + '</span></div>'
+      n.innerHTML = '<div class="ah"><span class="bdg">ขออนุญาต</span>' + esc(pm[0]) + ' <span class="ts dimts">' + esc(pm[2] || '') + '</span></div>'
         + (ev.cut ? '<div class="errbox">คำขอนี้ยาว ' + esc(ev.size) + ' ตัวอักษร แสดงไม่ครบ อย่ากดอนุญาตถ้าไม่แน่ใจ</div>' : '')
         + toolBody(ev.tool, ev.input).replace(/<div class="lbl">[^<]*<\/div>/g, '')
         + '<div class="btns" data-pid="' + esc(ev.pid) + '"><button class="btn pri" data-act="allow">อนุญาต</button>'
@@ -267,7 +269,8 @@
   function header(){
     var c = active && chats[active];
     $('welcome').hidden = !!c;
-    $('state').hidden = !c; $('btn-close').hidden = !c;
+    $('state').hidden = !c; $('btn-close').hidden = !c; $('btn-tmenu').hidden = !c;
+    if($('t-title').querySelector('input.rn')) return;
     renderChips();
     Object.keys(chats).forEach(function(id){ chats[id].feed.hidden = id !== active; });
     if(!c){ $('t-title').textContent = ''; $('t-sub').textContent = ''; return; }
@@ -289,42 +292,181 @@
     if(panelTimer !== null) loadPanel();
     $('input').focus();
   }
-  function renderOpen(){
-    var ids = Object.keys(chats);
-    $('open').innerHTML = ids.length ? ids.map(function(id){
-      var i = chats[id].info, st = i.waiting ? 'wait' : (i.busy ? 'busy' : '');
-      return '<button class="item' + (id === active ? ' on' : '') + '" data-open="' + esc(id) + '"><span class="st ' + st + '"></span><span class="it">' + esc(i.title) + '</span></button>';
-    }).join('') : '<div class="empty-side">ยังไม่มีเซสชันที่เปิด</div>';
-  }
-  function renderHist(){
-    var q = $('hist-q').value.trim().toLowerCase();
-    var rows = histAll.filter(function(h){ return !q || (h.title || '').toLowerCase().indexOf(q) >= 0; });
-    $('hist-n').textContent = histAll.length ? ' ' + histAll.length : '';
-    $('hist').innerHTML = rows.length ? rows.map(function(h){
-      return '<button class="item" data-resume="' + esc(h.sdk_id) + '" title="' + esc(h.title) + '"><span class="it">' + esc(h.title || 'ไม่มีชื่อ') + '</span><span class="at">' + esc(h.at) + '</span></button>';
-    }).join('') : '<div class="empty-side">' + (q ? 'ไม่พบ' : 'ยังไม่มีประวัติ') + '</div>';
-  }
-  // brand row: the account signed in on this PC (each person sees their own name)
-  function renderAcct(a){
-    var box = $('who');
-    if(!a || a.noCli){ box.innerHTML = a && a.noCli ? '<b>ยังไม่ได้ติดตั้ง Claude Code</b><div class="em">เปิดตัวติดตั้ง Setto Claude อีกครั้ง</div>' : '<span class="spin sm"></span>'; return; }
-    if(a.loggedIn === null || a.loggedIn === undefined){ box.innerHTML = '<span class="spin sm"></span>'; return; }
-    if(a.loggedIn){
-      box.innerHTML = '<b>' + esc(a.name || a.email || 'ล็อกอินแล้ว') + '</b>' + (a.name ? '<div class="em">' + esc(a.email || '') + '</div>' : '')
-        + '<div class="org"><i></i>' + esc([a.org, a.plan].filter(Boolean).join(' ')) + '</div>';
-    } else {
-      box.innerHTML = '<b>ยังไม่ได้ล็อกอิน</b><div class="org"><i class="off"></i>บัญชีบริษัท</div><button type="button" data-act="login">ล็อกอิน</button>';
+  // ── sidebar: one row per session, grouped by project folder, like the Claude app ──
+  var acct = null, showAll = {}, folded = {}, histRows = {};
+  try { folded = JSON.parse(localStorage.getItem('setto_folded') || '{}') || {}; } catch(err){}
+  function pkey(p){ return String(p || '').replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase(); }
+  function pname(p){ var parts = String(p || '').split(/[\\/]/).filter(Boolean); return parts.length ? parts[parts.length - 1] : 'ไม่ทราบโฟลเดอร์'; }
+  function renderOpen(){ renderSide(); }
+  function renderHist(){ renderSide(); }
+  function renderSide(){
+    if(document.querySelector('#groups input.rn')) return;   // a rename is being typed: don't wipe it
+    var q = $('hist-q').value.trim().toLowerCase(), groups = {}, order = [], openSdk = {};
+    function group(cwd){
+      var k = pkey(cwd);
+      if(!groups[k]){ groups[k] = { key:k, cwd:cwd, name:pname(cwd), items:[], ts:0 }; order.push(k); }
+      return groups[k];
     }
+    Object.keys(chats).forEach(function(id){
+      var i = chats[id].info, g = group(i.cwd || '');
+      if(i.sdk_id) openSdk[i.sdk_id] = 1;
+      g.items.push({ open:id, title:i.title, st:i.waiting ? 'wait' : (i.busy ? 'busy' : ''), ts:Infinity, born:chats[id].born || 0 });
+      g.ts = Infinity;
+    });
+    histRows = {};
+    histAll.forEach(function(h){
+      if((h.ids || [h.sdk_id]).some(function(x){ return openSdk[x]; })) return;
+      histRows[h.sdk_id] = h;
+      var g = group(h.cwd || '');
+      g.items.push({ resume:h.sdk_id, title:h.title || 'ไม่มีชื่อ', at:h.at, ts:h.ts || 0, born:0 });
+      g.ts = Math.max(g.ts, h.ts || 0);
+    });
+    var list = order.map(function(k){ return groups[k]; }).sort(function(x, y){ return y.ts - x.ts; });
+    var html = list.map(function(g){
+      var nameHit = q && g.name.toLowerCase().indexOf(q) >= 0;
+      var items = g.items.filter(function(it){ return !q || nameHit || it.title.toLowerCase().indexOf(q) >= 0; })
+        .sort(function(x, y){ return x.ts === y.ts ? y.born - x.born : (y.ts > x.ts ? 1 : -1); });
+      if(q && !items.length) return '';
+      var fold = !q && folded[g.key], max = (q || showAll[g.key]) ? items.length : 6;
+      var rows = fold ? '' : items.slice(0, max).map(function(it){
+        if(it.open) return '<button class="item' + (it.open === active ? ' on' : '') + '" data-open="' + esc(it.open) + '" title="' + esc(it.title) + '"><span class="it">' + esc(it.title) + '</span>' + (it.st ? '<span class="st ' + it.st + '"></span>' : '') + '</button>';
+        return '<button class="item" data-resume="' + esc(it.resume) + '" title="' + esc(it.title + (it.at ? '\n' + it.at : '')) + '"><span class="it">' + esc(it.title) + '</span></button>';
+      }).join('') + (items.length > max ? '<button class="more" type="button" data-more="' + esc(g.key) + '">ดูเพิ่ม ' + (items.length - max) + '</button>'
+        : (showAll[g.key] && items.length > 6 && !q ? '<button class="more" type="button" data-more="' + esc(g.key) + '">ย่อ</button>' : ''));
+      return '<div class="grp' + (fold ? ' folded' : '') + '"><div class="gh"><button class="gname" type="button" data-fold="' + esc(g.key) + '" title="' + esc(g.cwd) + '">' + esc(g.name) + '</button>'
+        + (g.cwd ? '<button class="gadd" type="button" data-newin="' + esc(g.cwd) + '" title="เซสชันใหม่ใน ' + esc(g.name) + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>' : '')
+        + '</div>' + rows + '</div>';
+    }).join('');
+    $('groups').innerHTML = html || '<div class="empty-side">' + (q ? 'ไม่พบ' : 'ยังไม่มีเซสชัน กด New เพื่อเริ่ม') + '</div>';
+  }
+
+  // ── session menu (title chevron, or right-click a row): Rename, Fork, Archive, Delete ──
+  var menuFor = null;   // {id?, sdk_id?, ids, cwd, title, row?}
+  function targetOf(row){
+    if(!row){ var c = active && chats[active]; return c ? { id:active, sdk_id:c.info.sdk_id, ids:[], cwd:c.info.cwd, title:c.info.title } : null; }
+    var o = row.getAttribute('data-open');
+    if(o && chats[o]){ var i = chats[o].info; return { id:o, sdk_id:i.sdk_id, ids:[], cwd:i.cwd, title:i.title, row:row }; }
+    var h = histRows[row.getAttribute('data-resume')];
+    return h ? { sdk_id:h.sdk_id, ids:h.ids || [h.sdk_id], cwd:h.cwd, title:h.title, row:row } : null;
+  }
+  function openSessMenu(t, x, y){
+    if(!t) return;
+    menuFor = t;
+    var m = $('menu-sess');
+    m.innerHTML = '<button class="mi" type="button" data-sop="rename"><span class="mt"><b>Rename</b></span><span class="rs">R</span></button>'
+      + '<button class="mi" type="button" data-sop="fork"' + (t.sdk_id ? '' : ' disabled') + '><span class="mt"><b>Fork</b></span><span class="rs">F</span></button>'
+      + '<div class="sep"></div>'
+      + '<button class="mi" type="button" data-sop="archive"><span class="mt"><b>Archive</b></span><span class="rs">A</span></button>'
+      + '<button class="mi danger" type="button" data-sop="delete"><span class="mt"><b>Delete</b></span><span class="rs">D</span></button>';
+    m.hidden = false;
+    var w = m.offsetWidth, hgt = m.offsetHeight;
+    m.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + 'px';
+    m.style.top = Math.max(8, Math.min(y, innerHeight - hgt - 8)) + 'px';
+  }
+  function closeSessMenu(){ $('menu-sess').hidden = true; menuFor = null; }
+  function sessOp(t, op, extra){
+    return api('/api/session', Object.assign({ op:op, id:t.id || '', sdk_id:t.sdk_id || '', ids:t.ids || [], cwd:t.cwd || '', title:t.title || '' }, extra || {}));
+  }
+  function startRename(t){
+    var span = t.row ? t.row.querySelector('.it') : $('t-title');
+    if(!span) return;
+    var inp = el('input', 'rn'); inp.value = t.title || ''; inp.maxLength = 120;
+    span.textContent = ''; span.appendChild(inp); inp.focus(); inp.select();
+    var done = false;
+    function finish(save){
+      if(done) return; done = true;
+      var v = inp.value.trim();
+      inp.remove();
+      if(save && v && v !== t.title){
+        if(t.id && chats[t.id]) chats[t.id].info.title = v;
+        sessOp(t, 'rename', { title:v }).then(function(r){ if(!r.ok) hint(r.error); refreshState(true); });
+      }
+      header(); renderSide();
+    }
+    inp.onkeydown = function(e){ e.stopPropagation(); if(e.key === 'Enter'){ e.preventDefault(); finish(true); } if(e.key === 'Escape'){ e.preventDefault(); finish(false); } };
+    inp.onclick = function(e){ e.stopPropagation(); };
+    inp.onblur = function(){ finish(true); };
+  }
+  function runSessOp(op, btn){
+    var t = menuFor; if(!t) return;
+    if(op === 'delete' && btn && !btn.classList.contains('sure')){
+      btn.classList.add('sure'); btn.querySelector('b').textContent = 'กดอีกครั้งเพื่อลบถาวร'; return;
+    }
+    closeSessMenu();
+    if(op === 'rename') return startRename(t);
+    if(op === 'fork') return sessOp(t, 'fork').then(function(r){ if(!r.ok) return hint(r.error); newChat(r.sdk_id, (t.title || 'เซสชัน') + ' (fork)', r.cwd || t.cwd); });
+    sessOp(t, op).then(function(r){
+      if(!r.ok) return hint(r.error);
+      if(t.id && chats[t.id]){ chats[t.id].feed.remove(); delete chats[t.id]; if(active === t.id) show(null); }
+      hint(op === 'delete' ? 'ลบเซสชันแล้ว' : 'เก็บเข้า Archive แล้ว');
+      refreshState(true);
+    });
+  }
+
+  // bottom row: the account signed in on this PC; its menu holds log in / log out
+  function initials(a){
+    var n = String((a && (a.name || a.email)) || '?').replace(/@.*/, '').trim();
+    var w = n.split(/[\s._-]+/).filter(Boolean);
+    return ((w[0] || '?').charAt(0) + (w.length > 1 ? w[1].charAt(0) : ((w[0] || '').charAt(1) || ''))).toUpperCase();
+  }
+  function planName(p){ p = String(p || ''); return p ? p.charAt(0).toUpperCase() + p.slice(1) : ''; }
+  function renderAcct(a){
+    acct = a || null;
+    var box = $('who');
+    if(!a || (a.loggedIn == null && !a.noCli)){ box.innerHTML = '<span class="spin sm"></span>'; return; }
+    if(a.noCli){ box.innerHTML = '<span class="av off">!</span><span class="an"><b>ยังไม่ได้ติดตั้ง Claude Code</b></span>'; return; }
+    if(a.loggedIn){
+      box.innerHTML = '<span class="av">' + esc(initials(a)) + '</span><span class="an"><b>' + esc(a.name || a.email || 'ล็อกอินแล้ว') + '</b>'
+        + (a.plan ? '<span class="pl"> · ' + esc(planName(a.plan)) + '</span>' : '') + '</span>'
+        + '<svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+    } else {
+      box.innerHTML = '<span class="av off">?</span><span class="an"><b>ยังไม่ได้ล็อกอิน</b></span><span class="login-pill" data-act="login">ล็อกอิน</span>';
+    }
+    if(!$('acct-menu').hidden) renderAcctMenu();
+  }
+  function renderAcctMenu(){
+    var a = acct || {}, m = $('acct-menu');
+    var folder = '<button class="mi" type="button" data-act="folder"><span class="mt"><b>เปลี่ยนโฟลเดอร์งาน</b></span></button>';
+    if(!a.loggedIn){
+      m.innerHTML = '<div class="am-h"><b>ยังไม่ได้ล็อกอิน</b><small>ล็อกอินด้วยอีเมลบริษัท</small></div><div class="sep"></div>'
+        + '<button class="mi" type="button" data-act="login"><span class="mt"><b>ล็อกอิน</b></span></button>' + folder;
+      return;
+    }
+    m.innerHTML = '<div class="am-h"><b>' + esc(a.email || a.name || '') + '</b><small>' + esc([a.org, planName(a.plan)].filter(Boolean).join(' · ')) + '</small></div><div class="sep"></div>'
+      + '<button class="mi" type="button" data-act="usage"><span class="mt"><b>Usage</b></span></button>' + folder
+      + '<div class="sep"></div><button class="mi danger" type="button" data-act="logout"><span class="mt"><b>ล็อกเอาท์</b></span></button>';
+  }
+  function logout(btn){
+    if(!btn.classList.contains('sure')){ btn.classList.add('sure'); btn.querySelector('b').textContent = 'กดอีกครั้งเพื่อล็อกเอาท์'; return; }
+    btn.disabled = true; btn.querySelector('b').textContent = 'กำลังล็อกเอาท์…';
+    api('/api/logout', {}).then(function(r){
+      $('acct-menu').hidden = true;
+      hint(r.ok ? 'ล็อกเอาท์แล้ว กดมุมซ้ายล่างเพื่อล็อกอินใหม่' : r.error);
+      usage = {}; renderUsage(); refreshState(true);
+    }).catch(function(e){ hint('ล็อกเอาท์ไม่สำเร็จ ' + e.message); btn.disabled = false; });
+  }
+
+  // usage: ring next to the model chip + popover (session = the 5-hour window, weekly)
+  function resetText(u){
+    if(!u || !u.resets_at) return '';
+    var d = new Date(u.resets_at > 1e12 ? u.resets_at : u.resets_at * 1000), mins = Math.round((d - Date.now()) / 60000);
+    if(mins <= 0) return 'รีเซ็ตแล้ว';
+    if(mins < 24 * 60) return 'รีเซ็ตในอีก ' + (mins >= 60 ? Math.floor(mins / 60) + ' ชม. ' : '') + (mins % 60) + ' นาที';
+    return 'รีเซ็ต ' + d.toLocaleString('th-TH', { weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
   }
   function renderUsage(){
-    var NAMES = { five_hour:'รอบ 5 ชั่วโมง', seven_day:'รอบสัปดาห์', seven_day_opus:'สัปดาห์ (Opus)', seven_day_sonnet:'สัปดาห์ (Sonnet)' };
-    var rows = Object.keys(usage || {}).filter(function(k){ return usage[k] && usage[k].util != null; });
-    $('usage').hidden = !rows.length;
-    $('usage').innerHTML = rows.map(function(k){
-      var u = usage[k], pct = Math.max(0, Math.min(100, Math.round(u.util))), at = '';
-      if(u.resets_at){ var d = new Date((u.resets_at > 1e12 ? u.resets_at : u.resets_at * 1000)); at = 'รีเซ็ต ' + d.toLocaleString('th-TH', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); }
-      return '<div class="u-row"><div class="u-top"><span><b>' + esc(NAMES[k] || k) + '</b> ' + pct + '%</span><span>' + esc(at) + '</span></div><div class="u-bar"><i class="' + (pct >= 90 ? 'full' : pct >= 70 ? 'hot' : '') + '" style="width:' + pct + '%"></i></div></div>';
-    }).join('');
+    var NAMES = { five_hour:'Session limit', seven_day:'Weekly', seven_day_opus:'Weekly (Opus)', seven_day_sonnet:'Weekly (Sonnet)' };
+    var rows = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'].filter(function(k){ return usage && usage[k] && usage[k].util != null; });
+    var s = usage && usage.five_hour && usage.five_hour.util != null ? Math.round(usage.five_hour.util) : null;
+    var ring = $('btn-usage');
+    ring.style.setProperty('--p', (s || 0) + '%');
+    ring.className = 'ring' + (s == null ? ' none' : s >= 90 ? ' full' : s >= 70 ? ' hot' : '');
+    ring.title = s == null ? 'Usage' : 'Session ' + s + '% used';
+    $('menu-usage').innerHTML = '<div class="uh">Usage</div>' + (rows.length ? rows.map(function(k){
+      var u = usage[k], pct = Math.max(0, Math.min(100, Math.round(u.util)));
+      return '<div class="u-row"><div class="u-top"><b>' + esc(NAMES[k]) + '</b><span>' + pct + '% used</span></div><div class="u-bar"><i class="' + (pct >= 90 ? 'full' : pct >= 70 ? 'hot' : '') + '" data-w="' + pct + '"></i></div><div class="u-at">' + esc(resetText(u)) + '</div></div>';
+    }).join('') : '<div class="u-none">ยังไม่มีข้อมูล ล็อกอินแล้วรอสักครู่</div>');
+    widths($('menu-usage'));
   }
 
   // ── mode / model / effort (active session, or the defaults for the next one) ──
@@ -335,7 +477,7 @@
     var cm = $('chip-mode');
     cm.className = 'chip' + (mode === 'bypassPermissions' ? ' bypass' : mode === 'auto' ? ' auto' : '');
     cm.innerHTML = esc(mu[1]) + ' <span class="dim">&#9662;</span>';
-    $('chip-model').innerHTML = esc(modelLabel(i.model || '')) + ' <span class="dim">' + esc(EFFORT_TH[i.effort || ''] || '') + ' &#9662;</span>';
+    $('chip-model').innerHTML = (i.fast && isOpus(i.model || 'claude-opus-5-5') ? '<span class="bolt" title="Fast mode">&#9889;</span>' : '') + esc(modelLabel(i.model || 'claude-opus-5-5')) + ' <span class="dim">' + esc(EFFORT_TH[i.effort || ''] || '') + ' &#9662;</span>';
   }
   function setOpt(kv){
     var c = active && chats[active];
@@ -343,6 +485,39 @@
     renderChips();
     if(c) api('/api/opts', Object.assign({ id:active }, kv)).then(function(r){ if(!r.ok) hint(r.error); });
     else api('/api/prefs', kv);
+  }
+  // model menu laid out like the Claude app: main models with number keys, Effort and More models
+  // as side menus, Fast mode switch
+  var MAIN_MODELS = [['claude-opus-5-5', 'Opus 5.5'], ['claude-fable-5-1', 'Fable 5.1'], ['claude-sonnet-5-5', 'Sonnet 5.5'], ['claude-haiku-5-5', 'Haiku 5.5']];
+  var I_CHECK = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+  var I_NEXT = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+  function curModel(){ var j = cur() || {}; return j.model || 'claude-opus-5-5'; }
+  function modelInfo(v){ return models.filter(function(x){ return x.value === v; })[0]; }
+  function isOpus(v){ return /opus/i.test(v || '') || v === 'default'; }
+  function modelMenuHtml(){
+    var j = cur() || {}, mv = curModel(), mainIds = MAIN_MODELS.map(function(m){ return m[0]; });
+    var info = modelInfo(mv) || {}, efforts = (info.efforts && info.efforts.length) ? info.efforts : ['low', 'medium', 'high', 'xhigh', 'max'];
+    var more = models.filter(function(m){ return m.value && mainIds.indexOf(m.value) < 0; });
+    var html = MAIN_MODELS.map(function(m, k){
+      var on = m[0] === mv;
+      return '<button class="mi row" type="button" data-model="' + m[0] + '"><span class="mt"><b>' + esc((modelInfo(m[0]) || {}).name || m[1]) + '</b></span><span class="rs">' + (on ? '<span class="okc">' + I_CHECK + '</span>' : (k + 1)) + '</span></button>';
+    }).join('');
+    html += '<div class="sep"></div>';
+    html += '<div class="mi row sub" tabindex="0"><span class="mt"><b>Effort</b></span><span class="rs">' + esc(EFFORT_TH[j.effort || ''] || '') + ' ' + I_NEXT + '</span><div class="fly">'
+      + [''].concat(efforts).map(function(e){ return '<button class="mi row" type="button" data-effort="' + e + '"><span class="mt"><b>' + esc(EFFORT_TH[e] || e) + '</b></span><span class="rs">' + ((j.effort || '') === e ? '<span class="okc">' + I_CHECK + '</span>' : '') + '</span></button>'; }).join('')
+      + '</div></div>';
+    if(more.length) html += '<div class="mi row sub" tabindex="0"><span class="mt"><b>More models</b></span><span class="rs">' + I_NEXT + '</span><div class="fly">'
+      + more.map(function(m){ return '<button class="mi row" type="button" data-model="' + esc(m.value) + '" title="' + esc(m.desc) + '"><span class="mt"><b>' + esc(m.name.replace(/\s*\(recommended\)/i, '')) + '</b>' + (m.desc ? '<small>' + esc(m.desc) + '</small>' : '') + '</span><span class="rs">' + (m.value === mv ? '<span class="okc">' + I_CHECK + '</span>' : '') + '</span></button>'; }).join('')
+      + '</div></div>';
+    var canFast = isOpus(mv);
+    html += '<div class="sep"></div><div class="mh">Fast mode</div>'
+      + '<button class="mi row" type="button" data-fast="1"' + (canFast ? '' : ' disabled title="ใช้ได้กับ Opus"') + '><span class="mt"><b>Enable fast mode</b></span><span class="sw' + (j.fast && canFast ? ' on' : '') + '"><i></i></span></button>';
+    return html;
+  }
+  function pickModel(v){
+    var kv = { model:v };
+    if(!isOpus(v) && (cur() || {}).fast) kv.fast = false;
+    setOpt(kv); $('menu-model').innerHTML = modelMenuHtml();
   }
   function openMenu(which){
     var mm = $('menu-mode'), md = $('menu-model');
@@ -353,12 +528,7 @@
       }).join('');
       mm.hidden = !mm.hidden; md.hidden = true;
     } else {
-      var j = cur() || {}, mv = j.model || '', list = models.length ? models : [{ value:'', name:'Default', desc:'', efforts:['low','medium','high','max'] }];
-      var sel = list.filter(function(x){ return x.value === mv; })[0] || list[0];
-      md.innerHTML = '<div class="mh">โมเดล</div>' + list.map(function(m){
-        return '<button class="mi" type="button" data-model="' + esc(m.value) + '"><span class="ck">' + (m.value === mv || (!mv && m.value === 'default') ? '&#10003;' : '') + '</span><span class="mt"><b>' + esc(m.name) + '</b><small>' + esc(m.desc) + '</small></span></button>';
-      }).join('') + (sel && (sel.efforts || []).length ? '<div class="sep"></div><div class="mh">Effort</div><div class="eff">'
-        + [''].concat(sel.efforts).map(function(e){ return '<button type="button" data-effort="' + e + '" class="' + ((j.effort || '') === e ? 'on' : '') + '">' + esc(EFFORT_TH[e] || e) + '</button>'; }).join('') + '</div>' : '');
+      md.innerHTML = modelMenuHtml();
       md.hidden = !md.hidden; mm.hidden = true;
     }
   }
@@ -423,8 +593,9 @@
       + '<div class="row">' + I_FOLDER + '<span class="rt" title="' + esc(p.cwd) + '"><b>' + esc(p.folder) + '</b> <span class="rs">' + esc(shortPath(p.cwd)) + '</span></span></div>'
       + (p.branch ? '<div class="row">' + I_BRANCH + '<span class="rt">' + esc(p.branch) + '</span></div>' : '');
     var cx = p.ctx;
-    $('p-ctx').innerHTML = '<div class="ph" data-pc="ctx">Context<span class="pv">' + (cx ? Math.round(cx.pct) + '% <span class="mini"><i style="width:' + Math.min(100, cx.pct) + '%"></i></span>' : 'ยังไม่มีข้อมูล') + '</span></div>'
+    $('p-ctx').innerHTML = '<div class="ph" data-pc="ctx">Context<span class="pv">' + (cx ? Math.round(cx.pct) + '% <span class="mini"><i data-w="' + Math.min(100, cx.pct) + '"></i></span>' : 'ยังไม่มีข้อมูล') + '</span></div>'
       + (cx && openPc.ctx ? '<div class="cat"><span>ใช้ไป</span><span>' + cx.total.toLocaleString() + ' / ' + cx.max.toLocaleString() + '</span></div>' + (cx.cats || []).map(function(c){ return '<div class="cat"><span>' + esc(c.name) + '</span><span>' + c.tokens.toLocaleString() + '</span></div>'; }).join('') : '');
+    widths($('p-ctx'));
     var mcp = p.mcp || [], okN = mcp.filter(function(m){ return m.status === 'connected'; }).length;
     $('p-mcp').innerHTML = '<div class="ph" data-pc="mcp">Connectors<span class="pv">' + (mcp.some(function(m){ return m.status; }) ? okN + ' connected' : mcp.length + ' ตัว') + '</span></div>'
       + (openPc.mcp ? mcp.map(function(m){ var st = m.status === 'connected' ? 'ok' : (/fail|error/.test(m.status) ? 'bad' : (m.status ? 'wait' : '')); return '<div class="row"><span class="dot ' + st + '"></span><span class="rt">' + esc(m.name) + '</span><span class="rs">' + esc(m.status || '') + '</span></div>'; }).join('') : '');
@@ -444,15 +615,16 @@
       Object.keys(chats).forEach(function(id){ if(chats[id].born < t0 && !s.chats.some(function(i){ return i.id === id; })){ chats[id].feed.remove(); delete chats[id]; if(active === id) active = null; } });
       histAll = s.history || [];
       prefs = s.prefs || prefs; usage = s.usage || {};
-      renderAcct(s.auth); renderUsage(); renderOpen(); renderHist(); header();
+      renderAcct(s.auth); renderUsage(); renderSide(); header();
     }).catch(function(){ hint('ติดต่อโปรแกรมไม่ได้ ปิดหน้าต่างแล้วเปิดใหม่จากไฟล์ .bat'); });
   }
 
   // ── actions ──
-  function newChat(resume, title){
-    return api('/api/new', { resume:resume || null, title:title || '' }).then(function(r){
+  function newChat(resume, title, cwd){
+    return api('/api/new', { resume:resume || null, title:title || '', cwd:cwd || '' }).then(function(r){
       if(!r.ok){ hint(r.error); return null; }
-      ensureChat({ id:r.id, title:title || 'เซสชันใหม่', busy:false, mode:prefs.mode || 'default', model:prefs.model || '', effort:prefs.effort || '' });
+      ensureChat({ id:r.id, title:title || 'เซสชันใหม่', busy:false, cwd:cwd || '', mode:prefs.mode || 'default', model:prefs.model || '', effort:prefs.effort || '' });
+      if(cwd && !resume){ loadCommands(true); loadPanel(); }
       show(r.id);
       return r.id;
     });
@@ -584,8 +756,9 @@
   $('menu-mode').onclick = function(e){ var b = e.target.closest('[data-mode]'); if(b){ setOpt({ mode:b.getAttribute('data-mode') }); $('menu-mode').hidden = true; } e.stopPropagation(); };
   $('menu-model').onclick = function(e){
     e.stopPropagation();
-    var m = e.target.closest('[data-model]'); if(m){ setOpt({ model:m.getAttribute('data-model') === 'default' ? '' : m.getAttribute('data-model') }); openMenu('model'); openMenu('model'); return; }
-    var f = e.target.closest('[data-effort]'); if(f){ setOpt({ effort:f.getAttribute('data-effort') }); $('menu-model').hidden = true; }
+    var m = e.target.closest('[data-model]'); if(m){ pickModel(m.getAttribute('data-model') === 'default' ? '' : m.getAttribute('data-model')); return; }
+    var f = e.target.closest('[data-effort]'); if(f){ setOpt({ effort:f.getAttribute('data-effort') }); $('menu-model').innerHTML = modelMenuHtml(); return; }
+    var x = e.target.closest('[data-fast]'); if(x && !x.disabled){ setOpt({ fast:!(cur() || {}).fast }); $('menu-model').innerHTML = modelMenuHtml(); }
   };
   $('cmds').onclick = function(e){ var b = e.target.closest('[data-cmd]'); if(b) pickCmd(b.getAttribute('data-cmd')); };
   $('btn-panel').onclick = function(){
@@ -603,7 +776,45 @@
       api('/api/folder', {}).then(function(r){ hint(r.ok ? (r.same ? '' : 'เปลี่ยนโฟลเดอร์แล้ว เซสชันใหม่จะทำงานที่นี่') : r.error); refreshState(true); loadCommands(true); loadPanel(); });
     }
   };
-  document.addEventListener('click', function(){ $('menu-mode').hidden = true; $('menu-model').hidden = true; });
+  document.addEventListener('click', function(e){
+    $('menu-mode').hidden = true; $('menu-model').hidden = true;
+    if(!e.target.closest('#dd-usage')) $('menu-usage').hidden = true;
+    if(!e.target.closest('#acct')) $('acct-menu').hidden = true;
+    if(!e.target.closest('#menu-sess') && !e.target.closest('#btn-tmenu')) closeSessMenu();
+  });
+  $('btn-usage').onclick = function(){
+    var m = $('menu-usage'); renderUsage(); m.hidden = !m.hidden;
+    if(!m.hidden) api('/api/state?force=1').then(function(st){ usage = st.usage || usage; setTimeout(function(){ api('/api/state').then(function(s2){ usage = s2.usage || usage; renderUsage(); }); }, 1500); }).catch(function(){});
+  };
+  $('who').onclick = function(e){
+    if(e.target.closest('[data-act=login]')){ $('acct-menu').hidden = true; return login(); }
+    var m = $('acct-menu'); renderAcctMenu(); m.hidden = !m.hidden;
+  };
+  $('acct-menu').onclick = function(e){
+    var b = e.target.closest('[data-act]'); if(!b) return;
+    var act = b.getAttribute('data-act');
+    if(act === 'logout') return logout(b);
+    $('acct-menu').hidden = true;
+    if(act === 'login') return login();
+    if(act === 'usage'){ e.stopPropagation(); renderUsage(); $('menu-usage').hidden = false; }
+  };
+  $('btn-tmenu').onclick = function(){
+    if(!$('menu-sess').hidden){ closeSessMenu(); return; }
+    var r = $('btn-tmenu').getBoundingClientRect(); openSessMenu(targetOf(null), r.left - 8, r.bottom + 6);
+  };
+  $('t-title').ondblclick = function(){ var t = targetOf(null); if(t) startRename(t); };
+  $('menu-sess').onclick = function(e){ var b = e.target.closest('[data-sop]'); if(b && !b.disabled) runSessOp(b.getAttribute('data-sop'), b); };
+  $('groups').oncontextmenu = function(e){
+    var row = e.target.closest('.item'); if(!row) return;
+    e.preventDefault(); openSessMenu(targetOf(row), e.clientX, e.clientY);
+  };
+  $('groups').onclick = function(e){
+    if(e.target.closest('input.rn')) return;
+    var f = e.target.closest('[data-fold]');
+    if(f){ var k = f.getAttribute('data-fold'); folded[k] = !folded[k]; if(!folded[k]) delete folded[k]; try { localStorage.setItem('setto_folded', JSON.stringify(folded)); } catch(err){} return renderSide(); }
+    var m = e.target.closest('[data-more]'); if(m){ var mk = m.getAttribute('data-more'); showAll[mk] = !showAll[mk]; return renderSide(); }
+    var n = e.target.closest('[data-newin]'); if(n) return newChat(null, '', n.getAttribute('data-newin'));
+  };
   $('btn-attach').onclick = function(){ $('file').click(); };
   $('file').onchange = function(e){ addFiles(e.target.files); e.target.value = ''; };
   $('atts').onclick = function(e){ var b = e.target.closest('[data-rm]'); if(b){ atts.splice(+b.getAttribute('data-rm'), 1); renderAtts(); } };
@@ -625,13 +836,19 @@
   });
   document.addEventListener('keydown', function(e){
     if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n'){ e.preventDefault(); newChat(); }
+    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k'){ e.preventDefault(); $('hist-q').focus(); $('hist-q').select(); }
+    if(!$('menu-model').hidden && /^[1-4]$/.test(e.key) && document.activeElement !== $('input')){ e.preventDefault(); pickModel(MAIN_MODELS[+e.key - 1][0]); return; }
+    if(!$('menu-sess').hidden && !e.ctrlKey && !e.altKey){
+      var sk = { r:'rename', f:'fork', a:'archive', d:'delete' }[e.key.toLowerCase()];
+      if(sk){ e.preventDefault(); var sb = $('menu-sess').querySelector('[data-sop=' + sk + ']'); if(sb && !sb.disabled) runSessOp(sk, sb); return; }
+      if(e.key === 'Escape'){ closeSessMenu(); return; }
+    }
     if(e.key === 'Escape' && active && chats[active] && chats[active].info.busy) api('/api/stop', { id:active });
   });
   document.addEventListener('click', function(e){
     var o = e.target.closest('[data-open]'); if(o) return show(o.getAttribute('data-open'));
     var r = e.target.closest('[data-resume]');
-    if(r){ var t = r.getAttribute('title'); return newChat(r.getAttribute('data-resume'), t); }
-    var l = e.target.closest('.who [data-act=login]'); if(l) return login();
+    if(r && !e.target.closest('input.rn')){ var h = histRows[r.getAttribute('data-resume')] || {}; return newChat(r.getAttribute('data-resume'), h.title, h.cwd); }
   });
   var dragN = 0;
   document.addEventListener('dragenter', function(e){ if(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') >= 0){ dragN++; $('drop').hidden = false; } });

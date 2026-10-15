@@ -10,26 +10,33 @@
 <body>
 <div class="app" id="app">
   <aside class="side">
-    <div class="brand">
-      <div class="mark" title="Setto"><svg viewBox="0 0 100 100" width="22" height="22" aria-hidden="true"><rect x="0" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="0" y="53.5" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="53.5" width="46.5" height="46.5" rx="10" fill="#8EDD8A"/></svg></div>
-      <div class="who" id="who"><span class="spin sm"></span></div>
+    <div class="brand" title="Setto Claude">
+      <div class="mark"><svg viewBox="0 0 100 100" width="16" height="16" aria-hidden="true"><rect x="0" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="0" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="0" y="53.5" width="46.5" height="46.5" rx="10" fill="currentColor"/><rect x="53.5" y="53.5" width="46.5" height="46.5" rx="10" fill="#8EDD8A"/></svg></div>
+      <span class="b1">Setto Claude</span>
     </div>
-    <div class="usage" id="usage" hidden></div>
-    <button class="new" id="btn-new" type="button" title="Ctrl+N">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      เซสชันใหม่
+    <button class="nav" id="btn-new" type="button" title="เซสชันใหม่ (Ctrl+N)">
+      <span class="plus"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>New
     </button>
-    <div class="sec">กำลังเปิด</div>
-    <div class="list" id="open"></div>
-    <div class="sec">ประวัติ<span id="hist-n"></span></div>
-    <input class="search" id="hist-q" type="search" placeholder="ค้นประวัติ">
-    <div class="list hist" id="hist"></div>
+    <label class="search">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="hist-q" type="search" placeholder="Search" autocomplete="off">
+      <kbd>Ctrl K</kbd>
+    </label>
+    <div class="groups" id="groups"></div>
+    <div class="acct" id="acct">
+      <div class="acct-menu" id="acct-menu" hidden></div>
+      <button class="acct-btn" id="who" type="button"><span class="spin sm"></span></button>
+    </div>
   </aside>
 
   <main class="main" id="main">
     <header class="top">
       <div class="top-l">
-        <div class="t-title" id="t-title"></div>
+        <div class="t-row" id="t-row">
+          <div class="t-title" id="t-title"></div>
+          <button class="t-dd" id="btn-tmenu" type="button" title="เมนูเซสชัน" hidden><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="menu smenu" id="menu-sess" hidden></div>
+        </div>
         <div class="t-sub" id="t-sub"></div>
       </div>
       <div class="top-r">
@@ -65,6 +72,7 @@
         <div class="dd" id="dd-mode"><button class="chip" id="chip-mode" type="button"></button><div class="menu up" id="menu-mode" hidden></div></div>
         <div class="hint" id="hint"></div>
         <div class="dd right" id="dd-model"><button class="chip" id="chip-model" type="button"></button><div class="menu up right" id="menu-model" hidden></div></div>
+        <div class="dd right" id="dd-usage"><button class="ring" id="btn-usage" type="button" title="Usage"><i></i></button><div class="menu up right usage-pop" id="menu-usage" hidden></div></div>
       </div>
     </footer>
     <div class="drop" id="drop" hidden><div><b>วางภาพหรือไฟล์ตรงนี้</b><span>ภาพส่งให้ Claude ดูได้ทันที ไฟล์อื่นแนบเป็นที่อยู่ไฟล์</span></div></div>

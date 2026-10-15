@@ -21,12 +21,13 @@ CONFIG_DIR = os.environ["CLAUDE_CONFIG_DIR"]
 
 from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, UserMessage,  # noqa: E402
                               SystemMessage, ResultMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-                              list_sessions, get_session_messages)
+                              list_sessions, get_session_messages, rename_session, delete_session,
+                              fork_session, tag_session)
 from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny, HookMatcher,  # noqa: E402
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.1"
+VERSION = "1.2"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -178,6 +179,7 @@ class Chat:
         # before the session existed applies to that one session only
         self.model = str(NEXT_CHAT_OPTS.pop("model", DEFAULT_MODEL))
         self.effort = NEXT_CHAT_OPTS.pop("effort", DEFAULT_EFFORT)
+        self.fast = bool(NEXT_CHAT_OPTS.pop("fast", False))   # Claude Code fast mode (Opus, billed as extra usage)
         self.reconnect = False
         self.ctx, self.outputs = None, []
         self.tasks = {}            # background tasks (shell / agents) by task id
@@ -189,6 +191,18 @@ class Chat:
         self.live = False
         self.stop_req = False
         self.closed = False
+        self.titled_id = None
+
+    def save_title(self):
+        sid, title = self.sdk_id, (self.title or "").strip()
+        if not sid or not title or sid == self.titled_id:
+            return
+        self.titled_id = sid
+        try:
+            rename_session(sid, title[:100], directory=self.cwd)
+            STATE["hist"] = None
+        except Exception as e:
+            log_file(f"auto title failed: {e}")
 
     # events are the single source the window renders from (long-polled by index)
     def emit(self, kind, **kw):
@@ -198,7 +212,7 @@ class Chat:
 
     def info(self):
         return {"id": self.id, "title": self.title or "เซสชันใหม่", "busy": self.busy, "sdk_id": self.sdk_id,
-                "mode": self.mode, "model": self.model, "effort": self.effort, "cwd": self.cwd,
+                "mode": self.mode, "model": self.model, "effort": self.effort, "fast": self.fast, "cwd": self.cwd,
                 "waiting": bool(self.perms), "ctx": self.ctx, "outputs": self.outputs[-30:],
                 "tasks": list(self.tasks.values())[-20:]}
 
@@ -272,6 +286,7 @@ class Chat:
         opts = ClaudeAgentOptions(
             cwd=self.cwd, resume=self.resume, permission_mode=self.mode, can_use_tool=self._perm,
             include_partial_messages=True, cli_path=CLI, model=self.model or None, effort=self.effort or None,
+            settings=json.dumps({"fastMode": bool(self.fast)}),
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[_keep_stream_open])]},
             # lets the mode menu switch to Bypass later; it does not bypass anything by itself
             extra_args={"allow-dangerously-skip-permissions": None},
@@ -331,6 +346,8 @@ class Chat:
                 self.resume = self.sdk_id or self.resume
 
     async def send(self, text, images, files):
+        if not self.title and (text or "").strip():
+            self.title = text.strip().splitlines()[0][:60]
         content = []
         for img in images:
             content.append({"type": "image", "source": {"type": "base64", "media_type": img["media_type"],
@@ -449,6 +466,7 @@ class Chat:
             return
         if isinstance(msg, ResultMessage):
             self.sdk_id = msg.session_id or self.sdk_id
+            threading.Thread(target=self.save_title, daemon=True).start()
             self.emit("result", ok=not msg.is_error, subtype=msg.subtype, ms=msg.duration_ms, turns=msg.num_turns,
                       text=(msg.result or "")[:500] if msg.is_error else "",
                       errors=[str(e)[:300] for e in (msg.errors or [])][:5])
@@ -515,6 +533,14 @@ class Chat:
             else:
                 await self._drop_client()
 
+    async def set_fast(self, on):
+        # a setting the CLI reads at start: reconnect (same conversation) before the next message
+        self.fast = bool(on)
+        if self.connecting or (self.client and self.busy):
+            self.reconnect = True
+        elif self.client:
+            await self._drop_client()
+
     async def mcp_status(self):
         if not self.client:
             return None
@@ -532,7 +558,8 @@ class Chat:
 
 CHATS = {}
 CHATS_LOCK = threading.Lock()
-STATE = {"last_poll": time.time(), "polled": False, "auth": None, "auth_at": 0, "hist": None, "hist_at": 0}
+STATE = {"last_poll": time.time(), "polled": False, "auth": None, "auth_at": 0, "hist": None, "hist_at": 0,
+         "usage_at": 0, "usage_busy": False}
 USAGE = load_json(USAGE_FILE, {})
 
 
@@ -549,6 +576,57 @@ def note_usage(info):
         save_json(USAGE_FILE, USAGE)
     except Exception as e:
         log_file(f"usage note failed: {e}")
+
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_KEYS = ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet")
+
+
+def _iso_epoch(v):
+    if not v:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _fetch_usage():
+    """Session (5 hours) + weekly limits of the signed-in account. The token stays on this PC and only
+    goes to api.anthropic.com, the same place Claude Code sends it; an expired token just waits for
+    Claude Code to refresh it on the next run."""
+    try:
+        cred = (load_json(os.path.join(CONFIG_DIR, ".credentials.json"), {}).get("claudeAiOauth") or {})
+        tok = cred.get("accessToken")
+        if not tok or (cred.get("expiresAt") or 0) / 1000 < time.time() + 30:
+            return
+        req = urllib.request.Request(USAGE_URL, headers={"Authorization": "Bearer " + tok,
+                                                         "anthropic-beta": "oauth-2025-04-20",
+                                                         "User-Agent": "setto-claude/" + VERSION})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        got = {}
+        for k in USAGE_KEYS:
+            v = d.get(k)
+            if isinstance(v, dict) and v.get("utilization") is not None:
+                got[k] = {"util": float(v["utilization"]), "resets_at": _iso_epoch(v.get("resets_at")),
+                          "status": "", "seen": time.time()}
+        if got:
+            for k in USAGE_KEYS:   # windows the plan no longer reports must not linger
+                USAGE.pop(k, None)
+            USAGE.update(got)
+            save_json(USAGE_FILE, USAGE)
+    except Exception as e:
+        log_file(f"usage fetch failed: {e}")
+    finally:
+        STATE["usage_busy"] = False
+
+
+def usage_now(force=False):
+    if not STATE["usage_busy"] and (force or time.time() - STATE["usage_at"] > 60):
+        STATE["usage_busy"], STATE["usage_at"] = True, time.time()
+        threading.Thread(target=_fetch_usage, daemon=True).start()
+    return USAGE
 
 
 COMMANDS = {}   # cwd -> {"at": time, "list": [...], "models": [...]}
@@ -581,6 +659,7 @@ async def _fetch_commands(cwd):
     known = {m["value"] for m in models}
     full = ["low", "medium", "high", "xhigh", "max"]
     for value, name, desc in (("claude-opus-5-5", "Opus 5.5", "รุ่นล่าสุด เก่งสุดสำหรับงานยาก"),
+                              ("claude-fable-5-1", "Fable 5.1", "รุ่น Fable"),
                               ("claude-sonnet-5-5", "Sonnet 5.5", "เร็วและเก่ง งานทั่วไป"),
                               ("claude-haiku-5-5", "Haiku 5.5", "เร็วสุด งานเล็ก")):
         if value not in known:   # the CLI's own list can lag behind the current models
@@ -624,17 +703,27 @@ def auth_status(force=False):
     return res
 
 
-def history(cwd, force=False):
+def history(force=False):
     if not force and STATE["hist"] is not None and time.time() - STATE["hist_at"] < 15:
         return STATE["hist"]
     try:
-        rows = list_sessions(directory=cwd, limit=60)
+        rows = list_sessions(limit=200)
     except Exception as e:
         log_file(f"list_sessions failed: {e}")
         rows = []
-    out = [{"sdk_id": s.session_id, "title": (s.custom_title or s.summary or s.first_prompt or "")[:90],
-            "at": dt.datetime.fromtimestamp(s.last_modified / 1000).strftime("%d/%m %H:%M") if s.last_modified else ""}
-           for s in rows]
+    seen, out = {}, []
+    for s in sorted(rows, key=lambda r: r.last_modified or 0, reverse=True):
+        if s.tag == "archived" or not (s.custom_title or "").strip():
+            continue
+        key = (os.path.normcase(os.path.normpath(s.cwd or "")), s.custom_title.strip())
+        if key in seen:
+            seen[key]["ids"].append(s.session_id)
+            continue
+        row = {"sdk_id": s.session_id, "ids": [s.session_id], "title": s.custom_title.strip()[:90],
+               "cwd": s.cwd or "", "ts": s.last_modified or 0,
+               "at": dt.datetime.fromtimestamp(s.last_modified / 1000).strftime("%d/%m %H:%M") if s.last_modified else ""}
+        seen[key] = row
+        out.append(row)
     STATE["hist"], STATE["hist_at"] = out, time.time()
     return out
 
@@ -813,11 +902,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with CHATS_LOCK:
                 chats = [c.info() for c in CHATS.values()]
             return self._send(200, {"ok": True, "version": VERSION, "cwd": self.CWD, "chats": chats,
-                                    "history": history(self.CWD, q.get("force") == "1"),
-                                    "auth": auth_status(q.get("auth") == "1"), "usage": USAGE,
+                                    "history": history(q.get("force") == "1"),
+                                    "auth": auth_status(q.get("auth") == "1"),
+                                    "usage": usage_now(q.get("force") == "1"),
                                     "prefs": {**(load_json(CONFIG, {}).get("prefs") or {}),
                                               "model": NEXT_CHAT_OPTS.get("model", DEFAULT_MODEL),
-                                              "effort": NEXT_CHAT_OPTS.get("effort", DEFAULT_EFFORT)}})
+                                              "effort": NEXT_CHAT_OPTS.get("effort", DEFAULT_EFFORT),
+                                              "fast": bool(NEXT_CHAT_OPTS.get("fast", False))}})
         if path == "/api/commands":
             lst = commands(self.CWD, q.get("refresh") == "1")
             return self._send(200, {"ok": True, "commands": lst,
@@ -861,6 +952,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/login":
             open_login_terminal()
             return {"ok": True}
+        if path == "/api/logout":
+            if not CLI:
+                return {"ok": False, "error": "ยังไม่ได้ติดตั้ง Claude Code"}
+            r = subprocess.run([CLI, "auth", "logout"], capture_output=True, text=True, timeout=30, encoding="utf-8",
+                               errors="replace", env={**os.environ, "CLAUDE_CONFIG_DIR": CONFIG_DIR},
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            STATE["auth"] = None
+            for k in USAGE_KEYS:
+                USAGE.pop(k, None)
+            save_json(USAGE_FILE, USAGE)
+            if r.returncode != 0:
+                return {"ok": False, "error": (r.stderr or r.stdout or "ล็อกเอาท์ไม่สำเร็จ").strip()[:200]}
+            return {"ok": True}
         if path == "/api/folder":
             got = pick_folder(Handler.CWD)
             if not got:
@@ -876,6 +980,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 NEXT_CHAT_OPTS["model"] = str(body["model"] or "")
             if body.get("effort") in EFFORTS:
                 NEXT_CHAT_OPTS["effort"] = body["effort"]
+            if "fast" in body:
+                NEXT_CHAT_OPTS["fast"] = bool(body["fast"])
             if kw:
                 save_prefs(**kw)
             return {"ok": True}
@@ -886,6 +992,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             w.restore()
             w.show()
             return {"ok": True}
+        if path == "/api/session":   # title menu / sidebar menu: rename, fork, archive, delete
+            return self._session_op(body)
         if path == "/api/new":
             resume = body.get("resume")
             if resume and not re.fullmatch(r"[0-9a-f-]{36}", str(resume)):
@@ -894,7 +1002,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for c in CHATS.values():
                     if resume and c.sdk_id == resume:
                         return {"ok": True, "id": c.id}
-            c = Chat(self.CWD, resume=resume, title=body.get("title") or "")
+            cwd = self.CWD
+            want = str(body.get("cwd") or "")
+            if want and os.path.isdir(want):
+                cwd = os.path.abspath(want)
+                if not resume and os.path.normcase(cwd) != os.path.normcase(self.CWD):
+                    set_folder(cwd)   # "+" on a project: that project becomes the working folder
+                    commands(cwd, refresh=True)
+            c = Chat(cwd, resume=resume, title=body.get("title") or "")
             with CHATS_LOCK:
                 CHATS[c.id] = c
             if resume:
@@ -915,6 +1030,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 c.busy = False
                 raise
         return self._post_chat(path, body, c)
+
+    def _session_op(self, body):
+        op, title = body.get("op"), str(body.get("title") or "").strip()[:120]
+        sid = str(body.get("sdk_id") or "")
+        c = CHATS.get(str(body.get("id") or ""))
+        if c and c.sdk_id:
+            sid = c.sdk_id
+        if sid and not re.fullmatch(r"[0-9a-f-]{36}", sid):
+            return {"ok": False, "error": "bad session id"}
+        if not c and sid:
+            with CHATS_LOCK:
+                c = next((x for x in CHATS.values() if x.sdk_id == sid), None)
+        where = c.cwd if c else (str(body.get("cwd") or "") or None)
+        if where and not os.path.isdir(where):
+            where = None
+
+        ids = [str(x) for x in (body.get("ids") or []) if re.fullmatch(r"[0-9a-f-]{36}", str(x))][:50]
+        if sid and sid not in ids:
+            ids.insert(0, sid)
+
+        def close_open():
+            if c:
+                with CHATS_LOCK:
+                    CHATS.pop(c.id, None)
+                run_async(c.close()).result(timeout=15)
+
+        if op == "rename":
+            if not title:
+                return {"ok": False, "error": "ชื่อว่าง"}
+            if c:
+                c.title, c.titled_id = title, c.sdk_id
+            for x in ids:
+                rename_session(x, title, directory=where)
+        elif op == "fork":
+            if not sid:
+                return {"ok": False, "error": "เซสชันนี้ยังไม่มีข้อความ"}
+            if c and c.busy:
+                return {"ok": False, "error": "รอให้ Claude ทำงานเสร็จก่อน"}
+            got = fork_session(sid, directory=where, title=(title or (c.title if c else "") or "เซสชัน")[:100] + " (fork)")
+            STATE["hist"] = None
+            return {"ok": True, "sdk_id": got.session_id, "cwd": where or ""}
+        elif op == "archive":
+            close_open()
+            for x in ids:
+                tag_session(x, "archived", directory=where)
+        elif op == "delete":
+            close_open()
+            for x in ids:
+                delete_session(x, directory=where)
+        else:
+            return {"ok": False, "error": "unknown op"}
+        STATE["hist"] = None
+        return {"ok": True}
 
     def _send_msg(self, c, body):
         def fail(msg):
@@ -989,6 +1157,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if body["effort"] not in EFFORTS:
                     return {"ok": False, "error": "bad effort"}
                 run_async(c.set_effort(body["effort"]))
+            if "fast" in body:
+                run_async(c.set_fast(bool(body["fast"])))
             return {"ok": True}
         if path == "/api/close":
             with CHATS_LOCK:

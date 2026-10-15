@@ -335,3 +335,8 @@ input.rn{width:100%;border:1px solid #38bdf8;background:rgba(56,189,248,.18);col
 #menu-folder .rs,#menu-env .rs{display:inline-flex;color:var(--muted-2)}
 #menu-folder .okc,#menu-env .okc{color:var(--accent);display:inline-flex}
 #menu-folder{max-height:60vh;overflow:auto}
+
+/* folder trust notice on the new-session screen */
+.trust{max-width:440px;background:var(--card);border:1px solid var(--border-strong);border-radius:14px;padding:18px 20px;text-align:left;box-shadow:var(--shadow-sm)}
+.trust b{display:block;font-size:15px;margin-bottom:6px}
+.trust p{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 14px}

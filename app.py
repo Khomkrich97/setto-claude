@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.4"
+VERSION = "1.5"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -836,14 +836,40 @@ def set_folder(path):
     Handler.CWD = path
     save_json(CONFIG, {**load_json(CONFIG, {}), "cwd": path})
     STATE["hist"] = None
-    # this folder's MCP servers from the personal profile (same as prepare.cmd does at start)
+    sync_profile(path)
+    return path
+
+
+SYNCED = set()
+
+
+def sync_profile(path, trust=False):
+    """This folder's MCP servers and trust from the personal profile (same as prepare.cmd does at start);
+    trust=True marks the folder trusted because the user pressed the button for it."""
+    key = os.path.normcase(os.path.normpath(path))
+    if key in SYNCED and not trust:
+        return
     try:
-        subprocess.run([sys.executable, os.path.join(HERE, "sync_mcp.py"), path], timeout=30,
-                       env={**os.environ, "CLAUDE_CONFIG_DIR": CONFIG_DIR},
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), capture_output=True)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "sync_mcp.py"), *(["--trust"] if trust else []), path],
+                           timeout=30, env={**os.environ, "CLAUDE_CONFIG_DIR": CONFIG_DIR},
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            SYNCED.add(key)
+        else:
+            log_file(f"sync_mcp failed: {(r.stderr or '')[-300:]}")
     except Exception as e:
         log_file(f"sync_mcp failed: {e}")
-    return path
+
+
+def folder_trusted(path):
+    """Same rule as Claude Code: the folder or one above it has the trust dialog accepted."""
+    want = os.path.normcase(os.path.normpath(path))
+    for k, p in (load_json(os.path.join(CONFIG_DIR, ".claude.json"), {}).get("projects") or {}).items():
+        k = os.path.normcase(os.path.normpath(k.replace("/", os.sep))).rstrip(os.sep)
+        if (p or {}).get("hasTrustDialogAccepted") and (want == k or want.startswith(k + os.sep)):
+            return True
+    return False
 
 
 def open_login_terminal():
@@ -918,6 +944,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with CHATS_LOCK:
                 chats = [c.info() for c in CHATS.values()]
             return self._send(200, {"ok": True, "version": VERSION, "cwd": self.CWD, "chats": chats,
+                                    "trusted": folder_trusted(self.CWD),
                                     "history": history(q.get("force") == "1"),
                                     "auth": auth_status(q.get("auth") == "1"),
                                     "usage": usage_now(q.get("force") == "1"),
@@ -1009,6 +1036,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             w.restore()
             w.show()
             return {"ok": True}
+        if path == "/api/trust":   # the user trusts the working folder (Claude Code's trust dialog)
+            sync_profile(Handler.CWD, trust=True)
+            commands(Handler.CWD, refresh=True)
+            return {"ok": folder_trusted(Handler.CWD)}
         if path == "/api/session":   # title menu / sidebar menu: rename, fork, archive, delete
             return self._session_op(body)
         if path == "/api/new":
@@ -1026,6 +1057,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not resume and os.path.normcase(cwd) != os.path.normcase(self.CWD):
                     set_folder(cwd)   # "+" on a project: that project becomes the working folder
                     commands(cwd, refresh=True)
+            sync_profile(cwd)
             c = Chat(cwd, resume=resume, title=body.get("title") or "")
             with CHATS_LOCK:
                 CHATS[c.id] = c
@@ -1492,6 +1524,7 @@ def main():
     Handler.KEY, Handler.PORT, Handler.CWD = key, port, cwd
     save_json(INSTANCE, {"port": port, "key": key, "pid": os.getpid()})
     threading.Thread(target=auth_status, daemon=True).start()
+    sync_profile(cwd)
     commands(cwd)
     url = f"http://127.0.0.1:{port}/?k={key}"
     try:

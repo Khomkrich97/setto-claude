@@ -546,6 +546,16 @@
     m.hidden = false;
   }
   function newDraft(){ show(null); $('input').focus(); }
+  // folder trust, like Claude Code's trust dialog: until trusted, the folder's own .claude settings
+  // (allowed commands, hooks) are ignored and Claude asks more often
+  var curTrusted = true;
+  function renderTrust(){
+    var w = $('welcome');
+    if(curTrusted || !curCwd){ w.innerHTML = ''; return; }
+    w.innerHTML = '<div class="trust"><b>ยังไม่ได้เชื่อถือโฟลเดอร์ ' + esc(pname(curCwd)) + '</b>'
+      + '<p>ถ้าเชื่อถือ Claude จะใช้การตั้งค่าในโฟลเดอร์นี้ เช่น คำสั่งที่อนุญาตไว้ และ hook ซึ่งรันคำสั่งบนเครื่องได้ กดเชื่อถือเฉพาะโฟลเดอร์ที่คุณหรือทีมสร้างเอง</p>'
+      + '<button class="btn pri" type="button" data-act="trust">เชื่อถือโฟลเดอร์นี้</button></div>';
+  }
   function pickModel(v){
     var kv = { model:v };
     if(!isOpus(v) && (cur() || {}).fast) kv.fast = false;
@@ -647,6 +657,7 @@
       Object.keys(chats).forEach(function(id){ if(chats[id].born < t0 && !s.chats.some(function(i){ return i.id === id; })){ chats[id].feed.remove(); delete chats[id]; if(active === id) active = null; } });
       histAll = s.history || [];
       if(s.cwd && s.cwd !== curCwd){ curCwd = s.cwd; renderFolderChip(); }
+      curTrusted = s.trusted !== false; renderTrust();
       prefs = s.prefs || prefs; usage = s.usage || {};
       renderAcct(s.auth); renderUsage(); renderSide(); header();
     }).catch(function(){ hint('ติดต่อโปรแกรมไม่ได้ ปิดหน้าต่างแล้วเปิดใหม่จากไฟล์ .bat'); });
@@ -775,6 +786,11 @@
 
   // ── events ──
   $('btn-new').onclick = newDraft;
+  $('welcome').onclick = function(e){
+    var b = e.target.closest('[data-act=trust]'); if(!b) return;
+    b.disabled = true; b.textContent = 'กำลังบันทึก…';
+    api('/api/trust', {}).then(function(r){ if(!r.ok){ hint('บันทึกไม่สำเร็จ'); b.disabled = false; b.textContent = 'เชื่อถือโฟลเดอร์นี้'; return; } curTrusted = true; renderTrust(); hint('เชื่อถือโฟลเดอร์แล้ว'); loadCommands(true); });
+  };
   $('chip-folder').onclick = function(e){ e.stopPropagation(); var m = $('menu-folder'); if(m.hidden){ closeMenus(); openFolderMenu(); } else m.hidden = true; };
   $('menu-folder').onclick = function(e){ e.stopPropagation(); var b = e.target.closest('[data-folder]'); if(!b) return; $('menu-folder').hidden = true; setFolder(b.getAttribute('data-folder')); };
   $('chip-env').onclick = function(e){ e.stopPropagation(); var m = $('menu-env'); m.innerHTML = '<button class="mi row" type="button"><span class="mt"><b>This computer</b><small>รันบนเครื่องนี้ ใช้ไฟล์และโปรแกรมในเครื่อง</small></span><span class="rs"><span class="okc">' + I_CHECK + '</span></span></button>'; var was = m.hidden; closeMenus(); m.hidden = !was; };

@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.3"
+VERSION = "1.4"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -559,7 +559,7 @@ class Chat:
 CHATS = {}
 CHATS_LOCK = threading.Lock()
 STATE = {"last_poll": time.time(), "polled": False, "auth": None, "auth_at": 0, "hist": None, "hist_at": 0,
-         "usage_at": 0, "usage_busy": False}
+         "usage_at": 0, "usage_busy": False, "usage_gap": 300}
 USAGE = load_json(USAGE_FILE, {})
 
 
@@ -580,6 +580,7 @@ def note_usage(info):
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_KEYS = ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet")
+USAGE_GAP = 300   # seconds between usage checks; doubles on 429 up to 30 minutes
 
 
 def _iso_epoch(v):
@@ -603,8 +604,20 @@ def _fetch_usage():
         req = urllib.request.Request(USAGE_URL, headers={"Authorization": "Bearer " + tok,
                                                          "anthropic-beta": "oauth-2025-04-20",
                                                          "User-Agent": "setto-claude/" + VERSION})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            d = json.loads(r.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                try:
+                    wait = int(e.headers.get("Retry-After") or 0)
+                except ValueError:
+                    wait = 0
+                STATE["usage_gap"] = min(1800, max(wait, STATE["usage_gap"] * 2))
+                log_file(f"usage fetch 429, next try in {STATE['usage_gap']}s")
+                return
+            raise
+        STATE["usage_gap"] = USAGE_GAP
         got = {}
         for k in USAGE_KEYS:
             v = d.get(k)
@@ -623,7 +636,10 @@ def _fetch_usage():
 
 
 def usage_now(force=False):
-    if not STATE["usage_busy"] and (force or time.time() - STATE["usage_at"] > 60):
+    # force = the Usage popover was opened: still at most once a minute, and never inside a 429 back-off
+    age = time.time() - STATE["usage_at"]
+    due = age > STATE["usage_gap"] or (force and age > 60 and STATE["usage_gap"] <= USAGE_GAP)
+    if not STATE["usage_busy"] and due:
         STATE["usage_busy"], STATE["usage_at"] = True, time.time()
         threading.Thread(target=_fetch_usage, daemon=True).start()
     return USAGE
@@ -1347,21 +1363,24 @@ def run_window(url):
     WINDOW["w"] = w
 
     def on_shown():
+        # Windows may open a new window behind the current one: lift it once. Plain Win32 through ctypes
+        # (releases the GIL); setting .NET properties such as w.native.Icon or w.on_top from this worker
+        # thread held the GIL while WinForms waited for the UI thread, which froze the whole app.
         try:
-            import clr  # noqa: F401  (pythonnet, comes with pywebview on Windows)
-            from System.Drawing import Icon
-            w.native.Icon = Icon(ICON)
+            u = ctypes.windll.user32
+            hwnd = u.FindWindowW(None, "Setto Claude")
+            if hwnd:
+                flags = 0x0001 | 0x0002 | 0x0040   # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+                u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, flags)   # HWND_TOPMOST
+                time.sleep(0.4)
+                u.SetWindowPos(hwnd, -2, 0, 0, 0, 0, flags)   # HWND_NOTOPMOST
+                u.SetForegroundWindow(hwnd)
         except Exception as e:
-            log_file(f"window icon failed: {e}")
-        try:   # Windows may open a new window behind the current one: lift it once
-            w.on_top = True
-            time.sleep(0.4)
-            w.on_top = False
-        except Exception:
-            pass
+            log_file(f"window lift failed: {e}")
     w.events.shown += on_shown
     try:
-        webview.start(private_mode=False, storage_path=os.path.join(APP_DIR, "webview"))
+        # the icon is set by pywebview itself on the UI thread while it builds the window
+        webview.start(private_mode=False, storage_path=os.path.join(APP_DIR, "webview"), icon=ICON)
     except Exception:
         log_file("pywebview start failed, using Edge\n" + traceback.format_exc())
         WINDOW["w"] = None

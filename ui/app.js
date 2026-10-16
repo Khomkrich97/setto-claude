@@ -316,11 +316,14 @@
       g.ts = Infinity;
     });
     histRows = {};
+    var openTitle = {};
+    Object.keys(chats).forEach(function(id){ var i = chats[id].info; openTitle[pkey(i.cwd) + '|' + i.title] = 1; });
     histAll.forEach(function(h){
-      if((h.ids || [h.sdk_id]).some(function(x){ return openSdk[x]; })) return;
-      histRows[h.sdk_id] = h;
+      if((h.ids || []).some(function(x){ return openSdk[x]; })) return;
+      if(!h.sdk_id && openTitle[pkey(h.cwd) + '|' + h.title]) return;   // a cleared session already opened here
+      histRows[h.key] = h;
       var g = group(h.cwd || '');
-      g.items.push({ resume:h.sdk_id, title:h.title || 'ไม่มีชื่อ', at:h.at, ts:h.ts || 0, born:0 });
+      g.items.push({ resume:h.key, title:h.title || 'ไม่มีชื่อ', at:h.at, ts:h.ts || 0, born:0 });
       g.ts = Math.max(g.ts, h.ts || 0);
     });
     var list = order.map(function(k){ return groups[k]; }).sort(function(x, y){ return y.ts - x.ts; });
@@ -349,7 +352,7 @@
     var o = row.getAttribute('data-open');
     if(o && chats[o]){ var i = chats[o].info; return { id:o, sdk_id:i.sdk_id, ids:[], cwd:i.cwd, title:i.title, row:row }; }
     var h = histRows[row.getAttribute('data-resume')];
-    return h ? { sdk_id:h.sdk_id, ids:h.ids || [h.sdk_id], cwd:h.cwd, title:h.title, row:row } : null;
+    return h ? { key:h.key, sdk_id:h.sdk_id, ids:h.ids || [], cwd:h.cwd, title:h.title, row:row } : null;
   }
   function openSessMenu(t, x, y){
     if(!t) return;
@@ -367,7 +370,7 @@
   }
   function closeSessMenu(){ $('menu-sess').hidden = true; menuFor = null; }
   function sessOp(t, op, extra){
-    return api('/api/session', Object.assign({ op:op, id:t.id || '', sdk_id:t.sdk_id || '', ids:t.ids || [], cwd:t.cwd || '', title:t.title || '' }, extra || {}));
+    return api('/api/session', Object.assign({ op:op, id:t.id || '', key:t.key || '', sdk_id:t.sdk_id || '', ids:t.ids || [], cwd:t.cwd || '', title:t.title || '' }, extra || {}));
   }
   function startRename(t){
     var span = t.row ? t.row.querySelector('.it') : $('t-title');
@@ -903,7 +906,12 @@
   document.addEventListener('click', function(e){
     var o = e.target.closest('[data-open]'); if(o) return show(o.getAttribute('data-open'));
     var r = e.target.closest('[data-resume]');
-    if(r && !e.target.closest('input.rn')){ var h = histRows[r.getAttribute('data-resume')] || {}; return newChat(r.getAttribute('data-resume'), h.title, h.cwd); }
+    if(r && !e.target.closest('input.rn')){
+      var h = histRows[r.getAttribute('data-resume')]; if(!h) return;
+      if(h.sdk_id) return newChat(h.sdk_id, h.title, h.cwd);
+      // cleared in the Claude app: start empty in that folder under the same name, like the app does
+      return setFolder(h.cwd).then(function(){ return newChat(null, h.title, h.cwd); });
+    }
   });
   var dragN = 0;
   document.addEventListener('dragenter', function(e){ if(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') >= 0){ dragN++; $('drop').hidden = false; } });

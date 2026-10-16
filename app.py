@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.5"
+VERSION = "1.6"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -192,6 +192,7 @@ class Chat:
         self.stop_req = False
         self.closed = False
         self.titled_id = None
+        self.ctx_at = 0
 
     def save_title(self):
         sid, title = self.sdk_id, (self.title or "").strip()
@@ -299,6 +300,7 @@ class Chat:
             self.connecting = False
         self.client = client   # reachable for close/stop from here on, even if the next step fails
         self.reader = asyncio.ensure_future(self._read_loop(client))
+        asyncio.ensure_future(self._context())
         applied, model = opts.permission_mode, opts.model or ""
         while self.mode != applied or self.model != model:   # changed while connecting (or applying)
             if self.mode != applied:
@@ -320,6 +322,9 @@ class Chat:
                     self.busy, self.auto = True, True
                     self.emit("auto_turn")
                 self._handle(msg)
+                if isinstance(msg, AssistantMessage) and time.time() - self.ctx_at > 20:
+                    self.ctx_at = time.time()
+                    asyncio.ensure_future(self._context())
                 if isinstance(msg, ResultMessage):
                     asyncio.ensure_future(self._context())
                     if self.turn_done is not None:
@@ -571,7 +576,9 @@ def note_usage(info):
         if util is not None:
             util = float(util)
             util = util * 100 if util <= 1 else util
-        USAGE[kind] = {"util": util, "resets_at": getattr(info, "resets_at", None),
+        if util is None:
+            util = (USAGE.get(kind) or {}).get("util")
+        USAGE[kind] = {"util": util, "resets_at": getattr(info, "resets_at", None) or (USAGE.get(kind) or {}).get("resets_at"),
                        "status": str(getattr(info, "status", "") or ""), "seen": time.time()}
         save_json(USAGE_FILE, USAGE)
     except Exception as e:
@@ -719,27 +726,85 @@ def auth_status(force=False):
     return res
 
 
+DESK_DIR = os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
+LOCAL_META = os.path.join(APP_DIR, "sessions.json")   # renames / archive done here for Claude-app sessions
+
+
+def desk_sessions():
+    """The Claude app's own session list: title, folder, the transcript in use (cliSessionId; none right
+    after Clear) and the older transcripts of the same session (priorCliSessionIds)."""
+    out = []
+    for dp, _, files in os.walk(DESK_DIR):
+        for f in files:
+            if f.startswith("local_") and f.endswith(".json"):
+                d = load_json(os.path.join(dp, f), None)
+                if isinstance(d, dict) and d.get("sessionId") and d.get("cwd"):
+                    out.append(d)
+    return out
+
+
 def history(force=False):
+    """One row per session the way the Claude app lists them. A session the app knows opens its current
+    transcript, or starts empty when it was cleared (never the transcript from before Clear). Other
+    sessions (made here or by Claude Code itself) are grouped by title; untitled ones are scripts/tests."""
     if not force and STATE["hist"] is not None and time.time() - STATE["hist_at"] < 15:
         return STATE["hist"]
     try:
-        rows = list_sessions(limit=200)
+        rows = list_sessions(limit=400)
     except Exception as e:
         log_file(f"list_sessions failed: {e}")
         rows = []
-    seen, out = {}, []
-    for s in sorted(rows, key=lambda r: r.last_modified or 0, reverse=True):
-        if s.tag == "archived" or not (s.custom_title or "").strip():
+    by_id = {s.session_id: s for s in rows}
+    meta = load_json(LOCAL_META, {})
+    hidden, titles = set(meta.get("hidden") or []), meta.get("titles") or {}
+    norm = lambda p: os.path.normcase(os.path.normpath(p or ""))
+    stamp = lambda ms: dt.datetime.fromtimestamp(ms / 1000).strftime("%d/%m %H:%M") if ms else ""
+    out, taken, cleared, desk_keys = [], set(), {}, set()
+    try:
+        desk = desk_sessions()
+    except Exception as e:
+        log_file(f"reading Claude app sessions failed: {e}")
+        desk = []
+    for d in desk:
+        cli = d.get("cliSessionId") or None
+        ids = [x for x in [cli, *(d.get("priorCliSessionIds") or [])] if x]
+        taken.update(ids)
+        key = "desk:" + d["sessionId"]
+        if d.get("isArchived") or key in hidden:
             continue
-        key = (os.path.normcase(os.path.normpath(s.cwd or "")), s.custom_title.strip())
-        if key in seen:
-            seen[key]["ids"].append(s.session_id)
-            continue
-        row = {"sdk_id": s.session_id, "ids": [s.session_id], "title": s.custom_title.strip()[:90],
-               "cwd": s.cwd or "", "ts": s.last_modified or 0,
-               "at": dt.datetime.fromtimestamp(s.last_modified / 1000).strftime("%d/%m %H:%M") if s.last_modified else ""}
-        seen[key] = row
+        title = titles.get(key) or (d.get("title") or "").strip() or "ไม่มีชื่อ"
+        desk_keys.add((norm(d["cwd"]), (d.get("title") or "").strip()))
+        ts = max(int(d.get("lastActivityAt") or 0), (by_id[cli].last_modified or 0) if cli in by_id else 0)
+        row = {"key": key, "sdk_id": cli, "ids": ids, "title": title[:90], "cwd": d["cwd"], "ts": ts, "at": stamp(ts),
+               "desk": True}
         out.append(row)
+        if not cli:   # cleared in the app: a session started here afterwards continues it
+            newest = max((by_id[x].created_at or 0 for x in ids if x in by_id), default=0)
+            cleared[(norm(d["cwd"]), title.strip())] = (row, newest)
+    seen = {}
+    for s in sorted(rows, key=lambda r: r.last_modified or 0, reverse=True):
+        title = (s.custom_title or "").strip()
+        if s.session_id in taken or s.tag == "archived" or not title or ("id:" + s.session_id) in hidden:
+            continue
+        k = (norm(s.cwd), title)
+        hit = cleared.get(k)
+        if hit and (s.created_at or 0) > hit[1]:
+            row = hit[0]
+            row["ids"].insert(0, s.session_id)
+            if not row["sdk_id"]:
+                row["sdk_id"], row["ts"] = s.session_id, max(row["ts"], s.last_modified or 0)
+                row["at"] = stamp(row["ts"])
+            continue
+        if k in desk_keys:   # an older transcript of a session the Claude app lists
+            continue
+        if k in seen:
+            seen[k]["ids"].append(s.session_id)
+            continue
+        row = {"key": "id:" + s.session_id, "sdk_id": s.session_id, "ids": [s.session_id], "title": title[:90],
+               "cwd": s.cwd or "", "ts": s.last_modified or 0, "at": stamp(s.last_modified)}
+        seen[k] = row
+        out.append(row)
+    out.sort(key=lambda r: r["ts"], reverse=True)
     STATE["hist"], STATE["hist_at"] = out, time.time()
     return out
 
@@ -1105,6 +1170,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     CHATS.pop(c.id, None)
                 run_async(c.close()).result(timeout=15)
 
+        key = str(body.get("key") or "")
+        if key and not re.fullmatch(r"(desk:local_|id:)[0-9a-f-]{36}", key):
+            return {"ok": False, "error": "bad key"}
+        if op in ("rename", "archive", "delete") and key:
+            meta = load_json(LOCAL_META, {})
+            if op == "rename" and title:
+                meta.setdefault("titles", {})[key] = title
+            elif op in ("archive", "delete"):
+                meta["hidden"] = sorted(set(meta.get("hidden") or []) | {key})
+            save_json(LOCAL_META, meta)
         if op == "rename":
             if not title:
                 return {"ok": False, "error": "ชื่อว่าง"}

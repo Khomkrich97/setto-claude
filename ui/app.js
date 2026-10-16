@@ -645,7 +645,8 @@
       + (p.branch ? '<div class="row">' + I_BRANCH + '<span class="rt">' + esc(p.branch) + '</span></div>' : '');
     var cx = p.ctx;
     $('p-ctx').innerHTML = '<div class="ph" data-pc="ctx">Context<span class="pv">' + (cx ? Math.round(cx.pct) + '% <span class="mini"><i data-w="' + Math.min(100, cx.pct) + '"></i></span>' : 'ยังไม่มีข้อมูล') + '</span></div>'
-      + (cx && openPc.ctx ? '<div class="cat"><span>ใช้ไป</span><span>' + cx.total.toLocaleString() + ' / ' + cx.max.toLocaleString() + '</span></div>' + (cx.cats || []).map(function(c){ return '<div class="cat"><span>' + esc(c.name) + '</span><span>' + c.tokens.toLocaleString() + '</span></div>'; }).join('') : '');
+      + (cx && openPc.ctx ? '<div class="cat"><span>ใช้ไป</span><span>' + cx.total.toLocaleString() + ' / ' + cx.max.toLocaleString() + '</span></div>'
+        + (cx.est ? '<div class="cat"><span>นับจากข้อความล่าสุดในไฟล์ แยกหมวดได้หลังส่งข้อความแรก</span><span></span></div>' : '') + (cx.cats || []).map(function(c){ return '<div class="cat"><span>' + esc(c.name) + '</span><span>' + c.tokens.toLocaleString() + '</span></div>'; }).join('') : '');
     widths($('p-ctx'));
     var mcp = p.mcp || [], okN = mcp.filter(function(m){ return m.status === 'connected'; }).length;
     $('p-mcp').innerHTML = '<div class="ph" data-pc="mcp">Connectors<span class="pv">' + (mcp.some(function(m){ return m.status; }) ? okN + ' connected' : mcp.length + ' ตัว') + '</span></div>'

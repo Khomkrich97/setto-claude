@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.8"
+VERSION = "1.9"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -166,6 +166,16 @@ async def _keep_stream_open(input_data, tool_use_id, context):
     return {"continue_": True}
 
 
+CTX_MAX_FILE = os.path.join(APP_DIR, "context-max.json")   # model -> context window, as Claude Code reported it
+
+
+def ctx_max(model):
+    known = load_json(CTX_MAX_FILE, {}).get(model or "")
+    if known:
+        return int(known)
+    return 1_000_000 if re.match(r"claude-(opus|sonnet|fable)-5", model or "") else 200_000
+
+
 class Chat:
     def __init__(self, cwd, resume=None, title=""):
         self.id = uuid.uuid4().hex[:12]
@@ -249,6 +259,17 @@ class Chat:
         except Exception as e:
             self.emit("error", text=f"อ่านประวัติเซสชันไม่ได้ ({e})")
             return
+        for m in reversed(msgs):
+            msg = m.message if isinstance(m.message, dict) else {}
+            u = msg.get("usage") if m.type == "assistant" else None
+            if isinstance(u, dict):
+                total = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                          "cache_read_input_tokens", "output_tokens"))
+                mx = ctx_max(str(msg.get("model") or ""))
+                self.ctx = {"pct": round(100 * total / mx, 1), "total": total, "max": mx,
+                            "model": str(msg.get("model") or ""), "cats": [], "est": True}
+                self.emit("context", **self.ctx)
+                break
         for m in msgs[-400:]:
             msg = m.message if isinstance(m.message, dict) else {}
             content = msg.get("content")
@@ -426,6 +447,10 @@ class Chat:
                       key=lambda c: -c["tokens"])
         self.ctx = {"pct": float(u.get("percentage") or 0), "total": int(u.get("totalTokens") or 0),
                     "max": int(u.get("maxTokens") or 0), "model": str(u.get("model") or ""), "cats": cats[:10]}
+        if self.ctx["model"] and self.ctx["max"]:
+            known = load_json(CTX_MAX_FILE, {})
+            if known.get(self.ctx["model"]) != self.ctx["max"]:
+                save_json(CTX_MAX_FILE, {**known, self.ctx["model"]: self.ctx["max"]})
         self.emit("context", **self.ctx)
 
     async def _drop_client(self):

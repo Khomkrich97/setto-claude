@@ -244,6 +244,8 @@
       add(c, el('div', 'note', 'งานเบื้องหลังเสร็จ Claude ทำต่อเอง'));
     } else if(k === 'context'){
       c.info.ctx = ev; if(active === c.info.id) loadPanel();
+    } else if(k === 'note'){
+      add(c, el('div', 'note', esc(ev.text || '')));
     } else if(k === 'hist_end'){
       add(c, el('div', 'note', 'ประวัติเดิมอยู่ด้านบน พิมพ์ต่อได้เลย'));
     }
@@ -252,8 +254,12 @@
   function poll(c){
     if(c.polling) return;
     c.polling = true;
-    api('/api/events?id=' + encodeURIComponent(c.info.id) + '&after=' + c.after).then(function(r){
+    api('/api/events?id=' + encodeURIComponent(c.info.id) + '&after=' + c.after + '&gen=' + (c.gen || 0)).then(function(r){
       if(!r.ok){ delete chats[c.info.id]; c.feed.remove(); if(active === c.info.id){ active = null; show(); } return; }
+      if((r.chat.gen || 0) !== (c.gen || 0)){   // history reloaded from the transcript: redraw from the start
+        c.gen = r.chat.gen || 0; c.after = 0; c.tools = {}; c.perms = {}; c.live = null; c.inner.innerHTML = '';
+        c.info = r.chat; return;
+      }
       r.events.forEach(function(ev){
         // one odd event must not stall the feed: show it and move on
         try { render(c, ev); } catch(err){ add(c, el('div', 'errbox', esc('แสดงรายการนี้ไม่ได้ (' + err.message + ')'))); }
@@ -399,7 +405,7 @@
     }
     closeSessMenu();
     if(op === 'rename') return startRename(t);
-    if(op === 'fork') return sessOp(t, 'fork').then(function(r){ if(!r.ok) return hint(r.error); newChat(r.sdk_id, (t.title || 'เซสชัน') + ' (fork)', r.cwd || t.cwd); });
+    if(op === 'fork') return sessOp(t, 'fork').then(function(r){ if(!r.ok) return hint(r.error); newChat(r.sdk_id, (t.title || 'เซสชัน') + ' (fork)', r.cwd || t.cwd, true); });
     sessOp(t, op).then(function(r){
       if(!r.ok) return hint(r.error);
       if(t.id && chats[t.id]){ chats[t.id].feed.remove(); delete chats[t.id]; if(active === t.id) show(null); }
@@ -667,8 +673,8 @@
   }
 
   // ── actions ──
-  function newChat(resume, title, cwd){
-    return api('/api/new', { resume:resume || null, title:title || '', cwd:cwd || '' }).then(function(r){
+  function newChat(resume, title, cwd, forked){
+    return api('/api/new', { resume:resume || null, title:title || '', cwd:cwd || '', fork_of:forked ? 1 : 0 }).then(function(r){
       if(!r.ok){ hint(r.error); return null; }
       ensureChat({ id:r.id, title:title || 'เซสชันใหม่', busy:false, cwd:cwd || '', mode:prefs.mode || 'default', model:prefs.model || '', effort:prefs.effort || '' });
       if(cwd && !resume){ loadCommands(true); loadPanel(); }

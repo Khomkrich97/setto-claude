@@ -22,12 +22,12 @@ CONFIG_DIR = os.environ["CLAUDE_CONFIG_DIR"]
 from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, UserMessage,  # noqa: E402
                               SystemMessage, ResultMessage, TextBlock, ToolUseBlock, ToolResultBlock,
                               list_sessions, get_session_messages, rename_session, delete_session,
-                              fork_session, tag_session)
+                              fork_session, tag_session, get_session_info)
 from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny, HookMatcher,  # noqa: E402
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.6"
+VERSION = "1.7"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -193,6 +193,9 @@ class Chat:
         self.closed = False
         self.titled_id = None
         self.ctx_at = 0
+        self.gen = 0               # bumps when the history is reloaded from the transcript
+        self.hist_mtime = 0        # transcript time when the history shown here was read
+        self.watch_at = 0
 
     def save_title(self):
         sid, title = self.sdk_id, (self.title or "").strip()
@@ -215,9 +218,32 @@ class Chat:
         return {"id": self.id, "title": self.title or "เซสชันใหม่", "busy": self.busy, "sdk_id": self.sdk_id,
                 "mode": self.mode, "model": self.model, "effort": self.effort, "fast": self.fast, "cwd": self.cwd,
                 "waiting": bool(self.perms), "ctx": self.ctx, "outputs": self.outputs[-30:],
-                "tasks": list(self.tasks.values())[-20:]}
+                "tasks": list(self.tasks.values())[-20:], "gen": self.gen}
+
+    def _mtime(self):
+        try:
+            info = get_session_info(self.sdk_id, directory=self.cwd)
+            return (info.last_modified or 0) if info else 0
+        except Exception:
+            return 0
+
+    def follow(self):
+        """The same transcript can be continued in the Claude app or a terminal. While this window has only
+        been reading it (no Claude Code process of its own on it), show what was added elsewhere."""
+        if not self.sdk_id or self.client or self.busy or self.connecting or time.time() - self.watch_at < 4:
+            return
+        self.watch_at = time.time()
+        m = self._mtime()
+        if m and self.hist_mtime and m > self.hist_mtime + 1000:
+            with self.cond:
+                self.events = []
+                self.gen += 1
+            self.resume = self.sdk_id
+            self.load_history()
+            self.emit("note", text="มีข้อความใหม่จากแอป Claude หรือเทอร์มินัล โหลดใหม่แล้ว")
 
     def load_history(self):
+        self.hist_mtime = self._mtime() if self.sdk_id else 0
         try:
             msgs = get_session_messages(self.resume, directory=self.cwd)
         except Exception as e:
@@ -730,6 +756,9 @@ DESK_DIR = os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-se
 LOCAL_META = os.path.join(APP_DIR, "sessions.json")   # renames / archive done here for Claude-app sessions
 
 
+DESK_CACHE = {}   # path -> last record that parsed (the app rewrites these files while we read them)
+
+
 def desk_sessions():
     """The Claude app's own session list: title, folder, the transcript in use (cliSessionId; none right
     after Clear) and the older transcripts of the same session (priorCliSessionIds)."""
@@ -737,10 +766,27 @@ def desk_sessions():
     for dp, _, files in os.walk(DESK_DIR):
         for f in files:
             if f.startswith("local_") and f.endswith(".json"):
-                d = load_json(os.path.join(dp, f), None)
+                path = os.path.join(dp, f)
+                d = load_json(path, None)
                 if isinstance(d, dict) and d.get("sessionId") and d.get("cwd"):
+                    DESK_CACHE[path] = d
+                else:   # half-written right now: the last good copy, so its old transcripts stay hidden
+                    d = DESK_CACHE.get(path)
+                if d:
                     out.append(d)
     return out
+
+
+def desk_cleared(sid):
+    """True when sid is a transcript from before Clear of a session the Claude app lists (not the one it
+    uses now). Opening it would bring the whole old conversation back into context."""
+    try:
+        for d in desk_sessions():
+            if sid in (d.get("priorCliSessionIds") or []) and d.get("cliSessionId") != sid:
+                return True
+    except Exception as e:
+        log_file(f"desk check failed: {e}")
+    return False
 
 
 def history(force=False):
@@ -1029,9 +1075,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not c:
                 return self._send(200, {"ok": False, "error": "gone"})
             after = int(q.get("after", "0") or 0)
+            if int(q.get("gen", "0") or 0) != c.gen:   # reloaded: the window starts over from event 0
+                return self._send(200, {"ok": True, "events": [], "chat": c.info()})
+            c.follow()
             with c.cond:
                 if len(c.events) <= after:
-                    c.cond.wait(timeout=20)
+                    c.cond.wait(timeout=6)
                 evs = copy.deepcopy(c.events[after:after + 500])
             return self._send(200, {"ok": True, "events": evs, "chat": c.info()})
         self._send(404, {"ok": False})
@@ -1111,6 +1160,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             resume = body.get("resume")
             if resume and not re.fullmatch(r"[0-9a-f-]{36}", str(resume)):
                 return {"ok": False, "error": "bad session id"}
+            if resume and not body.get("fork_of") and desk_cleared(resume):
+                resume = None   # cleared in the Claude app: start empty there too
+                STATE["hist"] = None
             with CHATS_LOCK:
                 for c in CHATS.values():
                     if resume and c.sdk_id == resume:
@@ -1128,7 +1180,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 CHATS[c.id] = c
             if resume:
                 c.load_history()
-            return {"ok": True, "id": c.id}
+                if any(resume == d.get("cliSessionId") for d in desk_sessions()):
+                    c.emit("note", text="เซสชันนี้ใช้ไฟล์เดียวกับแอป Claude เดสก์ท็อป ถ้าคุยที่นั่นต่อ หน้านี้จะโหลดตามให้ "
+                                        "แต่อย่าพิมพ์สั่งงานทั้งสองที่พร้อมกัน งานจะแยกเป็นสองทาง")
+            return {"ok": True, "id": c.id, "fresh": not resume and bool(body.get("resume"))}
         c = CHATS.get(str(body.get("id", "")))
         if not c:
             return {"ok": False, "error": "ไม่พบเซสชันนี้"}

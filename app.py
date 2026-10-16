@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.9"
+VERSION = "1.10"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -206,6 +206,7 @@ class Chat:
         self.gen = 0               # bumps when the history is reloaded from the transcript
         self.hist_mtime = 0        # transcript time when the history shown here was read
         self.watch_at = 0
+        self.active_at = 0 if resume else int(time.time() * 1000)   # a new session goes on top
 
     def save_title(self):
         sid, title = self.sdk_id, (self.title or "").strip()
@@ -220,6 +221,8 @@ class Chat:
 
     # events are the single source the window renders from (long-polled by index)
     def emit(self, kind, **kw):
+        if kind in ('user', 'text', 'delta', 'tool', 'tool_result', 'result', 'perm', 'ask') and not kw.get("hist"):
+            self.active_at = int(time.time() * 1000)
         with self.cond:
             self.events.append({"n": len(self.events), "kind": kind, "t": time.strftime("%H:%M"), **kw})
             self.cond.notify_all()
@@ -228,7 +231,8 @@ class Chat:
         return {"id": self.id, "title": self.title or "เซสชันใหม่", "busy": self.busy, "sdk_id": self.sdk_id,
                 "mode": self.mode, "model": self.model, "effort": self.effort, "fast": self.fast, "cwd": self.cwd,
                 "waiting": bool(self.perms), "ctx": self.ctx, "outputs": self.outputs[-30:],
-                "tasks": list(self.tasks.values())[-20:], "gen": self.gen}
+                "tasks": list(self.tasks.values())[-20:], "gen": self.gen,
+                "active_at": max(self.active_at, self.hist_mtime)}
 
     def _mtime(self):
         try:
@@ -1214,6 +1218,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     commands(cwd, refresh=True)
             sync_profile(cwd)
             c = Chat(cwd, resume=resume, title=body.get("title") or "")
+            if isinstance(body.get("ts"), int) and body["ts"] > 0:   # reopened from the list: keep its place
+                c.active_at = body["ts"]
             with CHATS_LOCK:
                 CHATS[c.id] = c
             if resume:

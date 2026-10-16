@@ -149,7 +149,9 @@
       c = chats[info.id] = { info:info, after:0, feed:feed, inner:inner, tools:{}, perms:{}, live:null, polling:false, born:Date.now() };
       feed.addEventListener('click', onFeedClick);
     }
+    var was = c.info && (c.info.busy || c.info.waiting);
     c.info = info;
+    if(was && !info.busy && !info.waiting && active !== info.id) c.unread = true;
     return c;
   }
   function atBottom(c){ return c.feed.scrollHeight - c.feed.scrollTop - c.feed.clientHeight < 120; }
@@ -265,8 +267,11 @@
         try { render(c, ev); } catch(err){ add(c, el('div', 'errbox', esc('แสดงรายการนี้ไม่ได้ (' + err.message + ')'))); }
         c.after = ev.n + 1;
       });
+      var was = c.info.busy || c.info.waiting;
       c.info = r.chat;
+      if(was && !c.info.busy && !c.info.waiting && active !== c.info.id) c.unread = true;
       if(active === c.info.id) header();
+      renderSide();
     }).catch(function(){ return new Promise(function(res){ setTimeout(res, 1500); }); })
       .then(function(){ c.polling = false; if(chats[c.info.id] && active === c.info.id) poll(c); });
   }
@@ -284,15 +289,13 @@
     if(!c){ $('t-title').textContent = ''; $('t-sub').textContent = ''; return; }
     $('t-title').textContent = c.info.title;
     $('t-sub').textContent = c.info.cwd || '';
-    var st = $('state');
-    if(c.info.waiting){ st.className = 'state wait'; st.innerHTML = 'รอคุณตอบ'; }
-    else if(c.info.busy){ st.className = 'state busy'; st.innerHTML = '<span class="spin sm"></span>กำลังทำงาน'; }
-    else { st.className = 'state'; st.textContent = 'พร้อม'; }
+    $('state').hidden = true;   // the sidebar dot shows working / waiting, like the Claude app
     $('btn-stop').hidden = !c.info.busy;
     $('btn-send').disabled = sending || !!c.info.busy;
   }
   function show(id){
     active = id || null;
+    if(active && chats[active]) chats[active].unread = false;
     header();
     renderOpen();
     var c = active && chats[active];
@@ -318,8 +321,10 @@
     Object.keys(chats).forEach(function(id){
       var i = chats[id].info, g = group(i.cwd || '');
       if(i.sdk_id) openSdk[i.sdk_id] = 1;
-      g.items.push({ open:id, title:i.title, st:i.waiting ? 'wait' : (i.busy ? 'busy' : ''), ts:Infinity, born:chats[id].born || 0 });
-      g.ts = Infinity;
+      var c0 = chats[id], st = i.waiting ? 'wait' : (i.busy ? 'busy' : (c0.unread ? 'done' : ''));
+      var ts = i.active_at || c0.born || 0;
+      g.items.push({ open:id, title:i.title, st:st, ts:ts, born:c0.born || 0 });
+      g.ts = Math.max(g.ts, ts);
     });
     histRows = {};
     var openTitle = {};
@@ -674,10 +679,13 @@
   }
 
   // ── actions ──
-  function newChat(resume, title, cwd, forked){
-    return api('/api/new', { resume:resume || null, title:title || '', cwd:cwd || '', fork_of:forked ? 1 : 0 }).then(function(r){
+  function newChat(resume, title, cwd, forked, ts){
+    return api('/api/new', { resume:resume || null, title:title || '', cwd:cwd || '', fork_of:forked ? 1 : 0, ts:ts || 0 }).then(function(r){
       if(!r.ok){ hint(r.error); return null; }
-      ensureChat({ id:r.id, title:title || 'เซสชันใหม่', busy:false, cwd:cwd || '', mode:prefs.mode || 'default', model:prefs.model || '', effort:prefs.effort || '' });
+      // keep a reopened session where it was in the list; only a brand-new one goes on top
+      var row = resume && histAll.filter(function(h){ return (h.ids || []).indexOf(resume) >= 0; })[0];
+      ensureChat({ id:r.id, title:title || 'เซสชันใหม่', busy:false, cwd:cwd || '', mode:prefs.mode || 'default', model:prefs.model || '', effort:prefs.effort || '',
+        sdk_id:resume || null, active_at:ts || (row ? row.ts : (resume ? 0 : Date.now())) });
       if(cwd && !resume){ loadCommands(true); loadPanel(); }
       show(r.id);
       return r.id;
@@ -915,9 +923,9 @@
     var r = e.target.closest('[data-resume]');
     if(r && !e.target.closest('input.rn')){
       var h = histRows[r.getAttribute('data-resume')]; if(!h) return;
-      if(h.sdk_id) return newChat(h.sdk_id, h.title, h.cwd);
+      if(h.sdk_id) return newChat(h.sdk_id, h.title, h.cwd, false, h.ts);
       // cleared in the Claude app: start empty in that folder under the same name, like the app does
-      return setFolder(h.cwd).then(function(){ return newChat(null, h.title, h.cwd); });
+      return setFolder(h.cwd).then(function(){ return newChat(null, h.title, h.cwd, false, h.ts); });
     }
   });
   var dragN = 0;

@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.7"
+VERSION = "1.8"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -752,7 +752,17 @@ def auth_status(force=False):
     return res
 
 
-DESK_DIR = os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
+def _desk_dir():
+    """Where the Claude app keeps its session list. The Store (MSIX) app's files really live in its package
+    folder; only programs the Claude app starts see them under %APPDATA%, so a Setto started from
+    its own shortcut found nothing there and fell back to pre-Clear transcripts."""
+    import glob
+    pk = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", "Claude_*", "LocalCache", "Roaming",
+                                "Claude", "claude-code-sessions"))
+    return pk[0] if pk else os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
+
+
+DESK_DIR = _desk_dir()
 LOCAL_META = os.path.join(APP_DIR, "sessions.json")   # renames / archive done here for Claude-app sessions
 
 
@@ -811,6 +821,9 @@ def history(force=False):
     except Exception as e:
         log_file(f"reading Claude app sessions failed: {e}")
         desk = []
+    if not desk and not STATE.get("desk_warned"):
+        STATE["desk_warned"] = True
+        log_file(f"no Claude app sessions found in {DESK_DIR}")
     for d in desk:
         cli = d.get("cliSessionId") or None
         ids = [x for x in [cli, *(d.get("priorCliSessionIds") or [])] if x]

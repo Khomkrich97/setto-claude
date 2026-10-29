@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.11"
+VERSION = "1.12"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -1111,10 +1111,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                               "model": NEXT_CHAT_OPTS.get("model", DEFAULT_MODEL),
                                               "effort": NEXT_CHAT_OPTS.get("effort", DEFAULT_EFFORT),
                                               "fast": bool(NEXT_CHAT_OPTS.get("fast", False))}})
-        if path == "/api/commands":
-            lst = commands(self.CWD, q.get("refresh") == "1")
-            return self._send(200, {"ok": True, "commands": lst,
-                                    "models": (COMMANDS.get(self.CWD) or {}).get("models", [])})
+        if path == "/api/commands":   # per open chat: project skills/commands live in its folder (.claude/)
+            c = CHATS.get(q.get("id", ""))
+            cwd = c.cwd if c else self.CWD
+            lst = commands(cwd, q.get("refresh") == "1")
+            return self._send(200, {"ok": True, "commands": lst, "cwd": cwd,
+                                    "models": (COMMANDS.get(cwd) or {}).get("models", [])})
         if path == "/api/panel":
             c = CHATS.get(q.get("id", ""))
             return self._send(200, {"ok": True, **panel_info(c.cwd if c else self.CWD, c)})

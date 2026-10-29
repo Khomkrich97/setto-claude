@@ -301,6 +301,7 @@
     var c = active && chats[active];
     if(c){ poll(c); setTimeout(function(){ c.feed.scrollTop = c.feed.scrollHeight; }, 30); }
     if(panelTimer !== null) loadPanel();
+    if(c && pkey(c.info.cwd) !== pkey(cmdCwd)) loadCommands(false);   // each project has its own skills
     $('input').focus();
   }
   // ── sidebar: one row per session, grouped by project folder, like the Claude app ──
@@ -588,10 +589,12 @@
       md.hidden = !md.hidden; mm.hidden = true;
     }
   }
+  var cmdCwd = null;
   function loadCommands(refresh){
-    api('/api/commands' + (refresh ? '?refresh=1' : '')).then(function(r){
-      if(!r.ok) return;
-      commandList = r.commands || []; models = r.models || [];
+    var id = active || '';
+    api('/api/commands?id=' + encodeURIComponent(id) + (refresh ? '&refresh=1' : '')).then(function(r){
+      if(!r.ok || (active || '') !== id) return;   // switched chat meanwhile: its own request wins
+      commandList = r.commands || []; models = r.models || []; cmdCwd = r.cwd || null;
       if(!commandList.length || !models.length) setTimeout(function(){ loadCommands(false); }, 4000);
       renderChips();
     }).catch(function(){});

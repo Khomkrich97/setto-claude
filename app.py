@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.12"
+VERSION = "1.13"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -244,9 +244,11 @@ class Chat:
     def follow(self):
         """The same transcript can be continued in the Claude app or a terminal. While this window has only
         been reading it (no Claude Code process of its own on it), show what was added elsewhere."""
-        if not self.sdk_id or self.client or self.busy or self.connecting or time.time() - self.watch_at < 4:
+        if not self.sdk_id or self.busy or self.connecting or self.perms or time.time() - self.watch_at < 4:
             return
         self.watch_at = time.time()
+        if self._desk_moved() or self.client:
+            return
         m = self._mtime()
         if m and self.hist_mtime and m > self.hist_mtime + 1000:
             with self.cond:
@@ -255,6 +257,34 @@ class Chat:
             self.resume = self.sdk_id
             self.load_history()
             self.emit("note", text="มีข้อความใหม่จากแอป Claude หรือเทอร์มินัล โหลดใหม่แล้ว")
+
+    def _desk_moved(self):
+        """Clear (or a new transcript) in the Claude app on a session open here: drop what this window
+        holds and follow the app, so both show the same context. Before this, a session cleared in the
+        app kept its whole old conversation here, and the next message resumed it (2026-10-29)."""
+        rec = next((d for d in desk_now() if self.sdk_id == d.get("cliSessionId")
+                    or self.sdk_id in (d.get("priorCliSessionIds") or [])), None)
+        cur = (rec or {}).get("cliSessionId") or None
+        if not rec or cur == self.sdk_id:
+            return False
+        if self.client:
+            try:
+                run_async(self._drop_client()).result(timeout=15)
+            except Exception as e:
+                log_file(f"drop client after app clear failed: {e}")
+        with self.cond:
+            self.events = []
+            self.gen += 1
+        self.ctx = None
+        self.sdk_id = self.resume = cur
+        if cur:
+            self.load_history()
+            self.emit("note", text="แอป Claude เริ่มบทสนทนาใหม่ของเซสชันนี้ โหลดตามแล้ว")
+        else:
+            self.hist_mtime = 0
+            self.emit("note", text="ล้างแชทในแอป Claude แล้ว ข้อความถัดไปเริ่มบทสนทนาใหม่")
+            self.emit("hist_end")
+        return True
 
     def load_history(self):
         self.hist_mtime = self._mtime() if self.sdk_id else 0
@@ -820,6 +850,17 @@ def desk_sessions():
                 if d:
                     out.append(d)
     return out
+
+
+def desk_now():
+    """desk_sessions() read at most every 3 s: every open chat checks it while the window polls."""
+    if time.time() - STATE.get("desk_at", 0) > 3:
+        try:
+            STATE["desk"], STATE["desk_at"] = desk_sessions(), time.time()
+        except Exception as e:
+            log_file(f"reading Claude app sessions failed: {e}")
+            STATE["desk_at"] = time.time()
+    return STATE.get("desk") or []
 
 
 def desk_cleared(sid):

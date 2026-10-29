@@ -27,7 +27,7 @@ from claude_agent_sdk.types import (PermissionResultAllow, PermissionResultDeny,
                                     StreamEvent, RateLimitEvent, TaskStartedMessage, TaskProgressMessage,
                                     TaskNotificationMessage, TaskUpdatedMessage)
 
-VERSION = "1.10"
+VERSION = "1.11"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Setto", "claude")
 UPLOADS = os.path.join(APP_DIR, "uploads")
 INSTANCE = os.path.join(APP_DIR, "instance.json")
@@ -784,11 +784,17 @@ def auth_status(force=False):
 def _desk_dir():
     """Where the Claude app keeps its session list. The Store (MSIX) app's files really live in its package
     folder; only programs the Claude app starts see them under %APPDATA%, so a Setto started from
-    its own shortcut found nothing there and fell back to pre-Clear transcripts."""
+    its own shortcut found nothing there and fell back to pre-Clear transcripts. Newer app versions move it out
+    of the package to %LOCALAPPDATA%\\Claude-Data\\claude_<package> (2026-10-29: the old folder kept only a
+    marker file, so Setto showed whole old transcripts the app no longer had in context)."""
     import glob
-    pk = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", "Claude_*", "LocalCache", "Roaming",
-                                "Claude", "claude-code-sessions"))
-    return pk[0] if pk else os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
+    local = os.environ.get("LOCALAPPDATA", "")
+    found = [p for p in glob.glob(os.path.join(local, "Claude-Data", "claude_*", "claude-code-sessions"))
+             + glob.glob(os.path.join(local, "Packages", "Claude_*", "LocalCache", "Roaming", "Claude",
+                                      "claude-code-sessions")) if os.path.isdir(p)]
+    if found:   # the folder the app wrote last is the one in use
+        return max(found, key=os.path.getmtime)
+    return os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
 
 
 DESK_DIR = _desk_dir()
